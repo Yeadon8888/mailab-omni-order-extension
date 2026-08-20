@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "MAILAB OMNI VIDEO",
-  "version": "1.0.0",
-  "description": "MAILAB Omni 公网接单、素材复制、Flow 视频转存 R2 与飞书回填工具。",
+  "version": "1.1.0",
+  "description": "MAILAB Omni 批量接单、自动投喂 Flow、生成监控、R2 转存与飞书回填工具。",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -32,6 +32,17 @@
         "https://labs.google/fx/tools/flow/*"
       ],
       "js": [
+        "page-hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://labs.google/fx/tools/flow/*"
+      ],
+      "js": [
+        "flow-adapter.js",
         "content.js"
       ],
       "run_at": "document_idle"
