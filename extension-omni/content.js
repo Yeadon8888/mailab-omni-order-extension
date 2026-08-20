@@ -3,10 +3,15 @@
   const BATCH_KEY = 'mailab_omni_batch_state_v2';
   const POSITION_KEY = 'mailab_omni_batch_position_v2';
   const MAX_ACTIVE = 10;
+  const PLUGIN_VERSION = chrome.runtime.getManifest().version;
   const adapter = globalThis.MailabFlowAdapter;
   const SHARE_PATH = /^\/fx\/tools\/flow\/shared\/video\/([0-9a-f-]{36})\/?$/i;
+  let shareWorkerPromise = null;
 
   if (!adapter) return;
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type === 'MAILAB_RUN_SHARE_WORKER' && adapter.isEditPage()) runShareWorker();
+  });
   if (adapter.isEditPage()) {
     runShareWorker();
     return;
@@ -79,7 +84,7 @@
     <button class="launcher" type="button">OMNI</button>
     <aside class="panel">
       <header class="head" id="drag-handle">
-        <div class="brand"><div class="mark">O</div><div><strong>OMNI AUTO DESK</strong><span>批量投喂 · 生成监控 · 自动回填</span></div></div>
+        <div class="brand"><div class="mark">O</div><div><strong>OMNI AUTO DESK</strong><span>v${PLUGIN_VERSION} · 批量投喂 · 生成监控 · 自动回填</span></div></div>
         <button class="icon" id="hide-button" type="button">—</button>
       </header>
       <main class="body">
@@ -620,7 +625,13 @@
   function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
   function clamp(value, min, max) { return Math.max(min, Math.min(value, max)); }
 
-  async function runShareWorker() {
+  function runShareWorker() {
+    if (shareWorkerPromise) return shareWorkerPromise;
+    shareWorkerPromise = executeShareWorker().finally(() => { shareWorkerPromise = null; });
+    return shareWorkerPromise;
+  }
+
+  async function executeShareWorker() {
     await delay(1200);
     const workResponse = await sendMessage({ type: 'MAILAB_GET_SHARE_WORK', url: location.href });
     const work = workResponse?.ok ? workResponse.data : null;

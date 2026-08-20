@@ -104,7 +104,10 @@ test('captures only Flow share links written by the page', async () => {
   const page = await browser.newPage();
   await page.setContent('<main>share fixture</main>');
   await page.evaluate(() => {
-    class ClipboardProbe { async writeText(value) { window.__lastClipboardValue = value; } }
+    class ClipboardProbe {
+      async writeText(value) { window.__lastClipboardValue = value; }
+      async write(items) { window.__lastClipboardItems = items; }
+    }
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: new ClipboardProbe() });
     window.__captured = [];
     window.addEventListener('message', (event) => {
@@ -115,9 +118,124 @@ test('captures only Flow share links written by the page', async () => {
   await page.evaluate(async () => {
     await navigator.clipboard.writeText('ordinary text');
     await navigator.clipboard.writeText('https://labs.google/fx/tools/flow/shared/video/0125f36a-d85b-4be1-8159-8251333444ad');
+    await navigator.clipboard.write([{
+      types: ['text/plain'],
+      getType: async () => new Blob(['https://labs.google/fx/tools/flow/shared/video/1125f36a-d85b-4be1-8159-8251333444ad'], { type: 'text/plain' })
+    }]);
   });
   await page.waitForTimeout(50);
   const captured = await page.evaluate(() => window.__captured);
-  assert.deepEqual(captured, ['https://labs.google/fx/tools/flow/shared/video/0125f36a-d85b-4be1-8159-8251333444ad']);
+  assert.deepEqual(captured, [
+    'https://labs.google/fx/tools/flow/shared/video/0125f36a-d85b-4be1-8159-8251333444ad',
+    'https://labs.google/fx/tools/flow/shared/video/1125f36a-d85b-4be1-8159-8251333444ad'
+  ]);
+  await page.close();
+});
+
+test('recovers when Flow drops the first menu, image, prompt and share action', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`
+    <style>
+      button,[role=button],[role=option],[contenteditable] { display:block; width:220px; min-height:36px; }
+      [hidden] { display:none !important; }
+    </style>
+    <button id="settings">Video · 720p · 10s crop_9_16 x1</button>
+    <div id="settings-menu" role="menu" hidden><button role="tab">Video</button><button role="tab">Ingredients</button><button>Omni Flash arrow_drop_down</button><button>x1</button></div>
+    <input id="file" type="file" accept="image/*" hidden>
+    <button id="open-picker">add_2 Create</button>
+    <div id="picker" role="dialog" hidden><div id="options"></div><button id="add-prompt">Add to Prompt</button></div>
+    <div id="composer"><div role="textbox" data-slate-editor="true" contenteditable="true"><p><span data-slate-placeholder="true" contenteditable="false">What do you want to create?</span><span data-slate-zero-width="n">﻿<br></span></p></div></div>
+    <button id="create" aria-disabled="true">arrow_forward Create</button>
+    <button id="share">share Share</button>
+    <div id="share-dialog" role="dialog" hidden><button role="switch" aria-checked="true">Include inputs</button><button id="copy">link Copy link</button></div>
+  `);
+  await page.evaluate(() => {
+    const nativeNow = Date.now.bind(Date);
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    let virtualTime = 0;
+    Date.now = () => nativeNow() + virtualTime;
+    window.setTimeout = (callback, delay = 0, ...args) => nativeSetTimeout(() => {
+      virtualTime += Number(delay) || 0;
+      callback(...args);
+    }, Math.min(Number(delay) || 0, 10));
+
+    class ClipboardProbe {
+      async writeText(value) { window.__lastClipboardValue = String(value || ''); }
+      async readText() { return String(window.__lastClipboardValue || ''); }
+    }
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: new ClipboardProbe() });
+
+    const attempts = window.__flowAttempts = { menu: 0, image: 0, prompt: 0, share: 0 };
+    const settings = document.getElementById('settings');
+    const settingsMenu = document.getElementById('settings-menu');
+    settings.addEventListener('pointerdown', () => {
+      attempts.menu += 1;
+      if (attempts.menu === 1) return;
+      settingsMenu.hidden = !settingsMenu.hidden;
+    });
+
+    let selected = false;
+    let attached = false;
+    const editor = document.querySelector('[data-slate-editor]');
+    const create = document.getElementById('create');
+    const sync = () => create.setAttribute('aria-disabled', attached && !editor.querySelector('[data-slate-placeholder]') ? 'false' : 'true');
+    document.getElementById('file').addEventListener('change', (event) => {
+      const option = document.createElement('div');
+      option.setAttribute('role', 'option');
+      option.textContent = `${event.target.files[0].name} Image`;
+      option.addEventListener('click', () => {
+        attempts.image += 1;
+        if (attempts.image === 1) return;
+        selected = true;
+        option.setAttribute('aria-selected', 'true');
+      });
+      document.getElementById('options').append(option);
+    });
+    document.getElementById('open-picker').addEventListener('click', () => { document.getElementById('picker').hidden = false; });
+    document.getElementById('add-prompt').addEventListener('click', () => {
+      if (!selected) return;
+      attached = true;
+      document.getElementById('picker').hidden = true;
+      const cancel = document.createElement('button');
+      cancel.textContent = 'cancel';
+      document.getElementById('composer').prepend(cancel);
+      sync();
+    });
+    editor.addEventListener('beforeinput', (event) => {
+      if (event.inputType !== 'insertText') return;
+      attempts.prompt += 1;
+      if (attempts.prompt === 1) return;
+      event.preventDefault();
+      editor.innerHTML = '<p><span data-slate-string="true"></span></p>';
+      editor.querySelector('[data-slate-string]').textContent = event.data;
+      sync();
+    });
+    editor.addEventListener('input', sync);
+
+    document.getElementById('share').addEventListener('click', () => { document.getElementById('share-dialog').hidden = false; });
+    document.querySelector('#share-dialog [role=switch]').addEventListener('click', (event) => event.currentTarget.setAttribute('aria-checked', 'false'));
+    document.getElementById('copy').addEventListener('click', () => {
+      attempts.share += 1;
+      if (attempts.share === 1) return;
+      navigator.clipboard.writeText('https://labs.google/fx/tools/flow/shared/video/0125f36a-d85b-4be1-8159-8251333444ad');
+    });
+  });
+  await page.addScriptTag({ path: hookPath });
+  await page.addScriptTag({ path: adapterPath });
+
+  const result = await page.evaluate(async () => {
+    const blob = new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' });
+    await MailabFlowAdapter.ensureOmniSettings();
+    await MailabFlowAdapter.uploadAndAttach(blob, 'mailab-retry.png');
+    await MailabFlowAdapter.setSlatePrompt('Retry-safe Flow prompt');
+    const shareUrl = await MailabFlowAdapter.captureShareLink();
+    return { attempts: window.__flowAttempts, shareUrl };
+  });
+
+  assert.ok(result.attempts.menu >= 2);
+  assert.ok(result.attempts.image >= 2);
+  assert.ok(result.attempts.prompt >= 1);
+  assert.ok(result.attempts.share >= 2);
+  assert.equal(result.shareUrl, 'https://labs.google/fx/tools/flow/shared/video/0125f36a-d85b-4be1-8159-8251333444ad');
   await page.close();
 });

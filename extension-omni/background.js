@@ -18,7 +18,7 @@ chrome.action.onClicked.addListener((tab) => {
 
 async function handleMessage(message, sender) {
   if (message?.type === 'mailab-api') return callMailabApi(message);
-  if (message?.type === 'MAILAB_OPEN_SHARE_WORK') return openShareWork(message.work);
+  if (message?.type === 'MAILAB_OPEN_SHARE_WORK') return openShareWork(message.work, sender.tab?.id);
   if (message?.type === 'MAILAB_GET_SHARE_WORK') return getShareWork(message.url, sender.tab?.id);
   if (message?.type === 'MAILAB_SHARE_CAPTURED') return completeShareWork(message, sender.tab?.id);
   if (message?.type === 'MAILAB_SHARE_FAILED') return failShareWork(message, sender.tab?.id);
@@ -26,17 +26,35 @@ async function handleMessage(message, sender) {
   throw new Error('未知的插件后台消息');
 }
 
-async function openShareWork(rawWork) {
+async function openShareWork(rawWork, sourceTabId) {
   const work = normalizeShareWork(rawWork);
   if (!work) throw new Error('分享任务参数无效');
+  if (Number.isInteger(sourceTabId)) work.sourceTabId = sourceTabId;
   const stored = await chrome.storage.local.get({ [SHARE_WORK_KEY]: {} });
   const jobs = stored[SHARE_WORK_KEY] || {};
   jobs[work.editUrl] = work;
   await chrome.storage.local.set({ [SHARE_WORK_KEY]: jobs });
-  const tab = await chrome.tabs.create({ url: work.editUrl, active: false });
+  const createOptions = { url: work.editUrl, active: true };
+  if (work.sourceTabId) createOptions.openerTabId = work.sourceTabId;
+  const tab = await chrome.tabs.create(createOptions);
   jobs[work.editUrl].tabId = tab.id;
   await chrome.storage.local.set({ [SHARE_WORK_KEY]: jobs });
+  await wakeShareWorker(tab.id);
   return { opened: true, tabId: tab.id };
+}
+
+async function wakeShareWorker(tabId) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    try {
+      await chrome.tabs.sendMessage(tabId, { type: 'MAILAB_RUN_SHARE_WORKER' });
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    }
+  }
+  throw new Error(lastError?.message || '自动分享页没有响应');
 }
 
 async function getShareWork(rawUrl, tabId) {
@@ -81,7 +99,7 @@ async function completeShareWork(message, tabId) {
   });
   delete jobs[editUrl];
   await chrome.storage.local.set({ [SHARE_WORK_KEY]: jobs });
-  if (tabId) setTimeout(() => chrome.tabs.remove(tabId).catch(() => {}), 900);
+  await restoreSourceTab(work, tabId);
   return { jobId: data.jobId, shareUrl };
 }
 
@@ -95,8 +113,13 @@ async function failShareWork(message, tabId) {
     delete jobs[editUrl];
     await chrome.storage.local.set({ [SHARE_WORK_KEY]: jobs });
   }
-  if (tabId) setTimeout(() => chrome.tabs.remove(tabId).catch(() => {}), 900);
+  await restoreSourceTab(work, tabId);
   return { cleared: Boolean(work) };
+}
+
+async function restoreSourceTab(work, shareTabId) {
+  if (work?.sourceTabId) await chrome.tabs.update(work.sourceTabId, { active: true }).catch(() => {});
+  if (shareTabId) setTimeout(() => chrome.tabs.remove(shareTabId).catch(() => {}), 900);
 }
 
 function patchOrder(recordId, patch) {
