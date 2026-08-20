@@ -1,0 +1,24 @@
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="18" y1="12" x2="112" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B1220"/>
+      <stop offset="0.48" stop-color="#123B3A"/>
+      <stop offset="1" stop-color="#0F172A"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="36" y1="31" x2="94" y2="92" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#DFFF3F"/>
+      <stop offset="0.55" stop-color="#35F2A2"/>
+      <stop offset="1" stop-color="#3DB9FF"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#020617" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect width="128" height="128" rx="30" fill="url(#bg)"/>
+  <path d="M25 92V36c0-6.1 4.9-11 11-11h56c6.1 0 11 4.9 11 11v56c0 6.1-4.9 11-11 11H36c-6.1 0-11-4.9-11-11Z" fill="#FFFFFF" opacity="0.07"/>
+  <path d="M36 82V46c0-5.5 4.5-10 10-10h36c5.5 0 10 4.5 10 10v36c0 5.5-4.5 10-10 10H46c-5.5 0-10-4.5-10-10Z" fill="#0B1220" stroke="url(#accent)" stroke-width="4" filter="url(#shadow)"/>
+  <path d="M57 52.8c0-3.1 3.4-5 6.1-3.4l19 11.2c2.6 1.6 2.6 5.4 0 7l-19 11.2c-2.7 1.6-6.1-.3-6.1-3.4V52.8Z" fill="url(#accent)"/>
+  <path d="M24 38c7-9.2 16.7-16 28-19" stroke="#DFFF3F" stroke-width="5" stroke-linecap="round" opacity="0.85"/>
+  <path d="M104 90c-7 9.2-16.7 16-28 19" stroke="#35F2A2" stroke-width="5" stroke-linecap="round" opacity="0.85"/>
+  <text x="64" y="116" fill="#E5FFE8" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="900" text-anchor="middle" letter-spacing="0">MAILAB</text>
+</svg>

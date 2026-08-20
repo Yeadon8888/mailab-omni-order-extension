@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MAILAB GEN VIDEO</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="app-shell">
+    <div id="toast" class="toast" hidden></div>
+
+    <header class="brand">
+      <img src="icons/icon48.png" alt="">
+      <div>
+        <h1>MAILAB GEN VIDEO</h1>
+        <p>公网接单工作台</p>
+      </div>
+    </header>
+
+    <section class="panel setup-panel">
+      <div class="pool-status">
+        <div>
+          <strong>任务池</strong>
+          <span id="poolDetail">正在读取待接单数量...</span>
+        </div>
+        <div class="pool-actions">
+          <b id="pendingCount">--</b>
+          <button id="refreshStatsButton" type="button" title="刷新任务池状态">刷新</button>
+        </div>
+      </div>
+      <label>
+        <span>公网后端地址</span>
+        <input id="serverInput" type="url" placeholder="https://genvideo.mailab.top">
+      </label>
+      <div class="claim-row">
+        <label>
+          <span>接单人</span>
+          <input id="assigneeInput" type="text" placeholder="请输入你的名字">
+        </label>
+        <button id="claimButton" type="button">接单</button>
+      </div>
+      <div id="status" class="status">填写后端地址和接单人，然后点击接单。</div>
+    </section>
+
+    <section class="panel task-panel">
+      <div class="task-head">
+        <div>
+          <strong>当前任务</strong>
+          <span id="taskMeta">未接单</span>
+        </div>
+        <div class="copy-actions">
+          <button id="copyPromptButton" type="button" disabled>复制提示词</button>
+          <button id="copyImageButton" type="button" disabled>复制图片</button>
+        </div>
+      </div>
+
+      <div class="material-grid">
+        <label class="material-card">
+          <span>提示词</span>
+          <textarea id="promptText" readonly placeholder="接单后同步提示词"></textarea>
+        </label>
+        <div class="material-card">
+          <span>图片预览</span>
+          <div class="image-frame">
+            <div id="imageEmpty" class="image-empty">接单后显示图片</div>
+            <img id="taskImage" alt="" hidden>
+          </div>
+        </div>
+      </div>
+
+      <label>
+        <span>视频链接</span>
+        <textarea id="watermarkInput" placeholder="粘贴最终视频链接，例如 https://...mp4"></textarea>
+      </label>
+
+      <button id="completeButton" class="complete-button" type="button" disabled>同步视频并完成</button>
+      <div id="result" class="result" hidden></div>
+    </section>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
