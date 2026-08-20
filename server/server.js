@@ -249,6 +249,10 @@ async function claimOrder(body) {
     return { ok: false, error: '暂无待接单任务' };
   }
 
+  return claimPendingRecord(pending, assignee, platform);
+}
+
+async function claimPendingRecord(pending, assignee, platform) {
   const lockId = crypto.randomUUID();
   const now = nowText();
   const previousLog = fieldText(pending.fields[config.fields.log]);
@@ -293,18 +297,33 @@ async function claimOmniBatch(body) {
 
   const orders = [];
   let error = '';
-  for (let index = 0; index < count; index += 1) {
+  let pendingRecords = [];
+  try {
+    pendingRecords = (await listPendingRecords())
+      .filter((record) => fieldText(record.fields?.[config.fields.status]) === config.statuses.pending)
+      .slice(0, count);
+  } catch (listError) {
+    return {
+      ok: false,
+      requested: count,
+      claimed: 0,
+      partial: true,
+      orders: [],
+      error: publicError(listError)
+    };
+  }
+
+  for (const pending of pendingRecords) {
     try {
-      const order = await claimOrder({ assignee, platform: 'Omni' });
-      if (!order.ok) {
-        error = order.error || '暂无待接单任务';
-        break;
-      }
+      const order = await claimPendingRecord(pending, assignee, 'Omni');
       orders.push(order);
     } catch (claimError) {
       error = publicError(claimError);
       break;
     }
+  }
+  if (orders.length < count && !error) {
+    error = pendingRecords.length < count ? '当前待接单任务数量不足' : '部分任务未能完成加锁';
   }
 
   return {
