@@ -188,6 +188,83 @@ test('claim records the selected production platform and release clears it', asy
   assert.ok(readUpdates(server.updatesPath).some((fields) => fields['制作平台'] === ''));
 });
 
+test('Omni batch claim can be recovered and safely released with per-order locks', async (t) => {
+  const server = await startServer('batch');
+  t.after(() => server.stop());
+
+  const claimResponse = await fetch(`http://127.0.0.1:${server.port}/api/omni/claim-batch`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ assignee: 'batch-tester', count: 3 })
+  });
+  assert.equal(claimResponse.status, 200);
+  const claimed = await claimResponse.json();
+  assert.equal(claimed.ok, true);
+  assert.equal(claimed.claimed, 3);
+  assert.equal(new Set(claimed.orders.map((order) => order.recordId)).size, 3);
+  assert.ok(claimed.orders.every((order) => order.platform === 'Omni' && order.lockId));
+
+  const candidates = claimed.orders.map(({ recordId, lockId }) => ({ recordId, lockId }));
+  const recoverResponse = await fetch(`http://127.0.0.1:${server.port}/api/omni/recover`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ assignee: 'batch-tester', orders: candidates })
+  });
+  const recovered = await recoverResponse.json();
+  assert.equal(recovered.ok, true);
+  assert.equal(recovered.orders.length, 3);
+  assert.ok(recovered.orders.every((order) => order.state === 'claimed'));
+
+  const releaseResponse = await fetch(`http://127.0.0.1:${server.port}/api/omni/release-batch`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ assignee: 'batch-tester', orders: candidates })
+  });
+  const released = await releaseResponse.json();
+  assert.equal(released.ok, true);
+  assert.equal(released.released, 3);
+  assert.equal(released.failed, 0);
+});
+
+test('the same Flow video cannot be bound to two batch orders', async (t) => {
+  const server = await startServer('batch');
+  t.after(() => server.stop());
+  const flowShareUrl = 'https://labs.google/fx/tools/flow/shared/video/67064cd9-aff7-40cb-b501-521ffc7312cc';
+
+  const claimResponse = await fetch(`http://127.0.0.1:${server.port}/api/omni/claim-batch`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ assignee: 'batch-tester', count: 2 })
+  });
+  const claimed = await claimResponse.json();
+
+  const firstResponse = await fetch(`http://127.0.0.1:${server.port}/api/omni/complete`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      recordId: claimed.orders[0].recordId,
+      lockId: claimed.orders[0].lockId,
+      assignee: 'batch-tester',
+      flowShareUrl
+    })
+  });
+  assert.equal(firstResponse.status, 200);
+
+  const duplicateResponse = await fetch(`http://127.0.0.1:${server.port}/api/omni/complete`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      recordId: claimed.orders[1].recordId,
+      lockId: claimed.orders[1].lockId,
+      assignee: 'batch-tester',
+      flowShareUrl
+    })
+  });
+  assert.equal(duplicateResponse.status, 500);
+  const duplicate = await duplicateResponse.json();
+  assert.match(duplicate.error, /已经绑定到另一个订单/);
+});
+
 test('Omni completes only after Flow video is archived and R2 is readable', async (t) => {
   const server = await startServer('omni-success');
   t.after(() => server.stop());
@@ -211,7 +288,8 @@ test('Omni completes only after Flow video is archived and R2 is readable', asyn
   assert.ok(completedJob, 'Omni archive job should complete');
   assert.match(completedJob.videoUrl, /^https:\/\/r2\.test\//);
   const updates = readUpdates(server.updatesPath);
-  assert.ok(updates.some((fields) => fields['去水印原始链接'] === flowShareUrl));
+  const hyperlinkUpdate = updates.find((fields) => fields['去水印原始链接']);
+  assert.deepEqual(hyperlinkUpdate['去水印原始链接'], { text: flowShareUrl, link: flowShareUrl });
   const completed = updates.find((fields) => fields['任务状态'] === '已完成');
   assert.ok(completed, 'readable R2 object should complete the Omni order');
   assert.match(String(completed['视频地址']), /^https:\/\/r2\.test\//);

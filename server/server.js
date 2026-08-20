@@ -12,6 +12,8 @@ const env = loadEnv();
 const CLAIM_PLATFORMS = new Set(['豆包', 'Omni']);
 const FLOW_HOST = 'labs.google';
 const FLOW_SHARE_PATH = /^\/fx\/tools\/flow\/shared\/video\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/?$/i;
+const MAX_OMNI_BATCH_ORDERS = 10;
+const OMNI_FLOW_RESERVATION_TTL_MS = 24 * 60 * 60 * 1000;
 const archiveRetryCount = Math.max(0, Number.parseInt(
   env.OSS_ARCHIVE_RETRY_COUNT || (env.OSS_ARCHIVE_MAX_ATTEMPTS ? String((Number.parseInt(env.OSS_ARCHIVE_MAX_ATTEMPTS, 10) || 1) - 1) : '3'),
   10
@@ -102,6 +104,7 @@ class AsyncMutex {
 const claimMutex = new AsyncMutex();
 const doubaoPolling = new Map();
 const completeJobs = new Map();
+const omniFlowReservations = new Map();
 const archiveQueue = [];
 const archiveQueuedKeys = new Set();
 let archiveRunning = 0;
@@ -122,7 +125,7 @@ const server = http.createServer(async (req, res) => {
         feishuConfigured: Boolean(config.feishuAppId && config.feishuAppSecret && config.appToken && config.tableId),
         archiveEnabled: config.archive.enabled,
         archiveConfigured: !config.archive.enabled || isArchiveConfigured(),
-        features: ['platform-claim', 'omni-complete']
+        features: ['platform-claim', 'omni-complete', 'omni-batch']
       });
       return;
     }
@@ -145,6 +148,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/claim') {
       const result = await claimMutex.runExclusive(() => claimOrder(body));
+      sendJson(res, 200, result);
+      return;
+    }
+    if (url.pathname === '/api/omni/claim-batch') {
+      const result = await claimMutex.runExclusive(() => claimOmniBatch(body));
       sendJson(res, 200, result);
       return;
     }
@@ -175,6 +183,16 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/omni/complete-status') {
       const result = getCompleteJobStatus(body, 'omni');
+      sendJson(res, 200, result);
+      return;
+    }
+    if (url.pathname === '/api/omni/recover') {
+      const result = await recoverOmniOrders(body);
+      sendJson(res, 200, result);
+      return;
+    }
+    if (url.pathname === '/api/omni/release-batch') {
+      const result = await releaseOmniBatch(body);
       sendJson(res, 200, result);
       return;
     }
@@ -262,6 +280,143 @@ async function claimOrder(body) {
   };
 }
 
+async function claimOmniBatch(body) {
+  requireFeishuConfig();
+  const assignee = String(body?.assignee || '').trim();
+  const count = Number.parseInt(body?.count, 10);
+  if (!assignee) {
+    throw new Error('请输入接单人');
+  }
+  if (!Number.isInteger(count) || count < 1 || count > MAX_OMNI_BATCH_ORDERS) {
+    throw new Error(`批量接单数量必须是 1–${MAX_OMNI_BATCH_ORDERS}`);
+  }
+
+  const orders = [];
+  let error = '';
+  for (let index = 0; index < count; index += 1) {
+    try {
+      const order = await claimOrder({ assignee, platform: 'Omni' });
+      if (!order.ok) {
+        error = order.error || '暂无待接单任务';
+        break;
+      }
+      orders.push(order);
+    } catch (claimError) {
+      error = publicError(claimError);
+      break;
+    }
+  }
+
+  return {
+    ok: orders.length > 0,
+    requested: count,
+    claimed: orders.length,
+    partial: orders.length < count,
+    orders,
+    error: orders.length ? error : (error || '暂无待接单任务')
+  };
+}
+
+async function recoverOmniOrders(body) {
+  requireFeishuConfig();
+  const assignee = String(body?.assignee || '').trim();
+  const candidates = normalizeLockCandidates(body?.orders);
+  if (!assignee) {
+    throw new Error('请输入接单人');
+  }
+  if (!candidates.length) {
+    return { ok: true, orders: [], missing: [] };
+  }
+
+  const orders = [];
+  const missing = [];
+  for (const candidate of candidates) {
+    try {
+      const record = await getRecord(candidate.recordId);
+      const fields = record.fields || {};
+      const ownsLock = fieldText(fields[config.fields.lockId]) === candidate.lockId
+        && fieldText(fields[config.fields.assignee]) === assignee
+        && fieldText(fields[config.fields.platform]) === 'Omni';
+      const status = fieldText(fields[config.fields.status]);
+      if (!ownsLock || ![config.statuses.inProgress, config.statuses.done].includes(status)) {
+        missing.push({ recordId: candidate.recordId, reason: '订单已释放、锁已变化或不属于当前接单人' });
+        continue;
+      }
+      const job = findRunningCompleteJob(candidate.recordId, candidate.lockId);
+      orders.push({
+        ok: true,
+        recordId: candidate.recordId,
+        lockId: candidate.lockId,
+        assignee,
+        platform: 'Omni',
+        prompt: fieldText(fields[config.fields.prompt]),
+        imageUrl: fieldText(fields[config.fields.imageUrl]),
+        flowShareUrl: fieldText(fields[config.fields.watermarkUrl]),
+        videoUrl: fieldText(fields[config.fields.videoUrl]),
+        status,
+        state: status === config.statuses.done ? 'completed' : (job ? 'processing' : 'claimed'),
+        jobId: job?.jobId || '',
+        message: status === config.statuses.done ? '已完成' : (job?.message || '已恢复接单状态')
+      });
+    } catch (error) {
+      missing.push({ recordId: candidate.recordId, reason: publicError(error) });
+    }
+  }
+  return { ok: true, orders, missing };
+}
+
+async function releaseOmniBatch(body) {
+  requireFeishuConfig();
+  const assignee = String(body?.assignee || '').trim();
+  const candidates = normalizeLockCandidates(body?.orders);
+  if (!assignee) {
+    throw new Error('请输入接单人');
+  }
+  if (!candidates.length) {
+    throw new Error('没有可释放的 Omni 订单');
+  }
+
+  const results = [];
+  for (const candidate of candidates) {
+    try {
+      await releaseOrder({
+        recordId: candidate.recordId,
+        lockId: candidate.lockId,
+        assignee,
+        platform: 'Omni',
+        reason: '用户在 Omni 批量工作台释放任务'
+      });
+      results.push({ recordId: candidate.recordId, ok: true });
+    } catch (error) {
+      results.push({ recordId: candidate.recordId, ok: false, error: publicError(error) });
+    }
+  }
+  return {
+    ok: results.some((item) => item.ok),
+    released: results.filter((item) => item.ok).length,
+    failed: results.filter((item) => !item.ok).length,
+    results
+  };
+}
+
+function normalizeLockCandidates(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const candidates = [];
+  const seen = new Set();
+  for (const item of value.slice(0, MAX_OMNI_BATCH_ORDERS)) {
+    const recordId = String(item?.recordId || '').trim();
+    const lockId = String(item?.lockId || '').trim();
+    if (!recordId || !lockId || seen.has(recordId)) {
+      continue;
+    }
+    seen.add(recordId);
+    candidates.push({ recordId, lockId });
+  }
+  return candidates;
+}
+
 async function startCompleteOrder(body) {
   requireFeishuConfig();
   const recordId = String(body?.recordId || '').trim();
@@ -341,6 +496,9 @@ async function startOmniComplete(body) {
 
   const existingJob = findRunningCompleteJob(recordId, lockId);
   if (existingJob) {
+    if (existingJob.flowShareUrl !== flowShareUrl) {
+      throw new Error('当前订单正在转存另一个 Flow 视频，请等待完成后再操作');
+    }
     return {
       ok: true,
       accepted: true,
@@ -350,6 +508,7 @@ async function startOmniComplete(body) {
     };
   }
 
+  const reservation = reserveOmniFlow(flowShareUrl, recordId, lockId);
   const jobId = crypto.randomUUID();
   const sourceVideoUrl = flowVideoSourceUrl(flowShareUrl);
   const job = {
@@ -370,7 +529,7 @@ async function startOmniComplete(body) {
 
   try {
     await updateRecord(recordId, {
-      [config.fields.watermarkUrl]: urlField(flowShareUrl),
+      [config.fields.watermarkUrl]: hyperlinkField(flowShareUrl),
       [config.fields.platform]: 'Omni',
       [config.fields.lastError]: '',
       [config.fields.log]: appendLog(
@@ -392,6 +551,9 @@ async function startOmniComplete(body) {
     }
   } catch (error) {
     completeJobs.delete(jobId);
+    if (reservation.created) {
+      releaseOmniFlowReservations(recordId, lockId);
+    }
     throw error;
   }
 
@@ -416,7 +578,7 @@ async function completeOrderWithVideoUrl({ recordId, lockId, assignee, videoUrl 
     const now = nowText();
     const waitsForArchive = config.archive.enabled;
     await updateRecord(recordId, {
-      [config.fields.videoUrl]: urlField(videoUrl),
+      [config.fields.videoUrl]: textUrlField(videoUrl),
       [config.fields.status]: waitsForArchive ? config.statuses.inProgress : config.statuses.done,
       ...(waitsForArchive ? {} : { [config.fields.completedAt]: Date.now() }),
       [config.fields.lastError]: '',
@@ -448,7 +610,7 @@ async function runCompleteOrderJob(job, record, options) {
   let videoUrl = '';
   try {
     if (config.writeWatermarkUrl) {
-      await updateRecord(job.recordId, { [config.fields.watermarkUrl]: urlField(writableWatermarkUrl) });
+      await updateRecord(job.recordId, { [config.fields.watermarkUrl]: hyperlinkField(writableWatermarkUrl) });
     }
     videoUrl = testMode ? config.testVideoUrl : await runWatermarkRemoval(writableWatermarkUrl);
     if (!videoUrl) {
@@ -457,7 +619,7 @@ async function runCompleteOrderJob(job, record, options) {
     const now = nowText();
     const waitsForArchive = config.archive.enabled;
     await updateRecord(job.recordId, {
-      [config.fields.videoUrl]: urlField(videoUrl),
+      [config.fields.videoUrl]: textUrlField(videoUrl),
       [config.fields.status]: waitsForArchive ? config.statuses.inProgress : config.statuses.done,
       ...(waitsForArchive ? {} : { [config.fields.completedAt]: Date.now() }),
       [config.fields.lastError]: '',
@@ -543,6 +705,8 @@ async function releaseOrder(body) {
   requireFeishuConfig();
   const recordId = String(body?.recordId || '').trim();
   const lockId = String(body?.lockId || '').trim();
+  const expectedAssignee = String(body?.assignee || '').trim();
+  const expectedPlatform = String(body?.platform || '').trim();
   const reason = String(body?.reason || '用户释放任务').trim();
   if (!recordId || !lockId) {
     throw new Error('缺少 recordId 或 lockId');
@@ -551,8 +715,22 @@ async function releaseOrder(body) {
   if (fieldText(record.fields[config.fields.lockId]) !== lockId) {
     throw new Error('接单锁不匹配，不能释放');
   }
+  if (fieldText(record.fields[config.fields.status]) !== config.statuses.inProgress) {
+    throw new Error('只有接单中的任务可以释放');
+  }
   const assignee = fieldText(record.fields[config.fields.assignee]) || '未知接单人';
+  const platform = fieldText(record.fields[config.fields.platform]);
+  if (expectedAssignee && assignee !== expectedAssignee) {
+    throw new Error('接单人不匹配，不能释放');
+  }
+  if (expectedPlatform && platform !== expectedPlatform) {
+    throw new Error(`当前任务不属于 ${expectedPlatform} 工作台`);
+  }
+  if (findRunningCompleteJob(recordId, lockId)) {
+    throw new Error('视频正在转存，暂时不能释放');
+  }
   await resetRecordForRetry(record, `${assignee} 释放任务：${reason}`);
+  releaseOmniFlowReservations(recordId, lockId);
   return { ok: true };
 }
 
@@ -963,12 +1141,12 @@ async function runVideoArchive({ recordId, lockId, assignee, videoUrl, source, f
       [config.fields.lastError]: '',
       ...(source === 'omni' ? {
         [config.fields.platform]: 'Omni',
-        [config.fields.watermarkUrl]: urlField(flowShareUrl)
+        [config.fields.watermarkUrl]: hyperlinkField(flowShareUrl)
       } : {}),
       [config.fields.log]: appendLog(fieldText(latest.fields?.[config.fields.log]), line)
     };
     if (config.archive.writeBack && archived.publicUrl) {
-      fields[config.fields.videoUrl] = urlField(archived.publicUrl);
+      fields[config.fields.videoUrl] = textUrlField(archived.publicUrl);
     }
     await updateRecord(recordId, fields);
     finishOmniCompleteJob(completeJobId, {
@@ -1598,6 +1776,43 @@ function flowVideoSourceUrl(flowShareUrl) {
   return `https://${FLOW_HOST}/fx/api/og-video/shared/${match[1].toLowerCase()}`;
 }
 
+function reserveOmniFlow(flowShareUrl, recordId, lockId) {
+  cleanupOmniFlowReservations();
+  const normalized = normalizeFlowShareUrl(flowShareUrl);
+  const match = normalized && new URL(normalized).pathname.match(FLOW_SHARE_PATH);
+  const videoId = String(match?.[1] || '').toLowerCase();
+  if (!videoId) {
+    throw new Error('Flow 视频分享链接无效');
+  }
+  const existing = omniFlowReservations.get(videoId);
+  if (existing && (existing.recordId !== recordId || existing.lockId !== lockId)) {
+    throw new Error('这个 Flow 视频已经绑定到另一个订单，请检查任务对应关系');
+  }
+  omniFlowReservations.set(videoId, {
+    recordId,
+    lockId,
+    expiresAt: Date.now() + OMNI_FLOW_RESERVATION_TTL_MS
+  });
+  return { videoId, created: !existing };
+}
+
+function cleanupOmniFlowReservations() {
+  const now = Date.now();
+  for (const [videoId, reservation] of omniFlowReservations) {
+    if (!reservation?.expiresAt || reservation.expiresAt <= now) {
+      omniFlowReservations.delete(videoId);
+    }
+  }
+}
+
+function releaseOmniFlowReservations(recordId, lockId = '') {
+  for (const [videoId, reservation] of omniFlowReservations) {
+    if (reservation.recordId === recordId && (!lockId || reservation.lockId === lockId)) {
+      omniFlowReservations.delete(videoId);
+    }
+  }
+}
+
 function normalizeDoubaoUrl(value) {
   const text = String(value || '').trim();
   const match = text.match(/https:\/\/www\.doubao\.com\/(?:thread\/[^\s"'<>]+|video-sharing\?[^\s"'<>]+)/);
@@ -1680,9 +1895,14 @@ function fieldText(value) {
   return String(value);
 }
 
-function urlField(value) {
+function textUrlField(value) {
   const url = String(value || '').trim();
   return url || null;
+}
+
+function hyperlinkField(value) {
+  const url = String(value || '').trim();
+  return url ? { text: url, link: url } : null;
 }
 
 function appendLog(previous, line) {

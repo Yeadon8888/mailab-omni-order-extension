@@ -6,7 +6,7 @@ const sourceUrl = 'https://source.test/video.mp4';
 const brokenR2Url = 'https://r2.test/mailab/videos/2026/07/20/rec1-deadbeefdeadbeef.mp4';
 const flowShareUrl = 'https://labs.google/fx/tools/flow/shared/video/67064cd9-aff7-40cb-b501-521ffc7312cc';
 const flowSourceUrl = 'https://labs.google/fx/api/og-video/shared/67064cd9-aff7-40cb-b501-521ffc7312cc';
-let mutableFields = {};
+const mutableFieldsByRecord = new Map();
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -15,7 +15,12 @@ function json(data, status = 200) {
   });
 }
 
-function recordFields() {
+function mutableFields(recordId) {
+  return mutableFieldsByRecord.get(recordId) || {};
+}
+
+function recordFields(recordId = 'rec1') {
+  const mutable = mutableFields(recordId);
   if (scenario === 'retry') {
     return {
       任务状态: '已完成',
@@ -34,7 +39,19 @@ function recordFields() {
       图片地址: 'https://image.test/input.png',
       接单日志: '',
       制作平台: '',
-      ...mutableFields
+      ...mutable
+    };
+  }
+  if (scenario === 'batch') {
+    return {
+      任务状态: '待接单',
+      接单人: '',
+      接单锁ID: '',
+      提示词: `批量测试提示词 ${recordId}`,
+      图片地址: `https://image.test/${recordId}.png`,
+      接单日志: '',
+      制作平台: '',
+      ...mutable
     };
   }
   return {
@@ -45,7 +62,7 @@ function recordFields() {
     接单锁ID: 'lock1',
     制作平台: 'Omni',
     去水印原始链接: flowShareUrl,
-    ...mutableFields
+    ...mutable
   };
 }
 
@@ -57,23 +74,35 @@ globalThis.fetch = async (input, options = {}) => {
     return json({ code: 0, tenant_access_token: 'test-token', expire: 7200 });
   }
 
-  if (url.pathname.endsWith('/records/rec1')) {
+  const recordMatch = url.pathname.match(/\/records\/(rec\d+)$/);
+  if (recordMatch) {
+    const recordId = recordMatch[1];
     if (method === 'PUT') {
       const body = JSON.parse(String(options.body || '{}'));
-      mutableFields = { ...mutableFields, ...(body.fields || {}) };
-      if (updatesPath) {
-        fs.appendFileSync(updatesPath, `${JSON.stringify(body.fields || {})}\n`);
+      const hyperlink = body.fields?.['去水印原始链接'];
+      if (hyperlink != null && (
+        typeof hyperlink !== 'object'
+        || hyperlink.text !== hyperlink.link
+        || !String(hyperlink.link || '').startsWith('https://')
+      )) {
+        return json({ code: 1254068, msg: 'URLFieldConvFail' });
       }
-      return json({ code: 0, data: { record: { record_id: 'rec1', fields: body.fields || {} } } });
+      mutableFieldsByRecord.set(recordId, { ...mutableFields(recordId), ...(body.fields || {}) });
+      if (updatesPath) {
+        fs.appendFileSync(updatesPath, `${JSON.stringify({ ...(body.fields || {}), __recordId: recordId })}\n`);
+      }
+      return json({ code: 0, data: { record: { record_id: recordId, fields: body.fields || {} } } });
     }
-    return json({ code: 0, data: { record: { record_id: 'rec1', fields: recordFields() } } });
+    return json({ code: 0, data: { record: { record_id: recordId, fields: recordFields(recordId) } } });
   }
 
   if (url.pathname.endsWith('/records') && method === 'GET') {
     return json({
       code: 0,
       data: {
-        items: ['retry', 'claim'].includes(scenario) ? [{ record_id: 'rec1', fields: recordFields() }] : [],
+        items: scenario === 'batch'
+          ? ['rec1', 'rec2', 'rec3', 'rec4', 'rec5'].map((recordId) => ({ record_id: recordId, fields: recordFields(recordId) }))
+          : ['retry', 'claim'].includes(scenario) ? [{ record_id: 'rec1', fields: recordFields() }] : [],
         has_more: false
       }
     });

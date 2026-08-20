@@ -28,6 +28,9 @@ For other users to access it, deploy to a cloud server or expose it with a tunne
 - `POST /api/complete-status` with `{ "jobId": "..." }`; returns `processing`, `completed`, or `failed`.
 - `POST /api/omni/complete` with `{ "recordId": "...", "lockId": "...", "assignee": "...", "flowShareUrl": "https://labs.google/fx/tools/flow/shared/video/..." }`; queues Flow extraction and R2 archival without watermark removal.
 - `POST /api/omni/complete-status` with `{ "jobId": "..." }`; the order becomes complete only after the R2 public URL is readable and written back to Feishu.
+- `POST /api/omni/claim-batch` with `{ "assignee": "name", "count": 5 }`; claims 1–10 Omni orders under the shared claim mutex and returns any safe partial result.
+- `POST /api/omni/recover` with `{ "assignee": "name", "orders": [{ "recordId": "...", "lockId": "..." }] }`; validates locally saved locks and restores active or completed cards.
+- `POST /api/omni/release-batch` with the same assignee and order-lock list; releases only owned, in-progress orders without active transfer jobs.
 - `POST /api/complete` also accepts `"testMode": true`, which skips the watermark API and writes `MAILAB_TEST_VIDEO_URL` back to Feishu for URL-field testing.
 - `POST /api/release` with `{ "recordId": "...", "lockId": "...", "reason": "..." }`
 - `GET /api/image-proxy?url=...`
@@ -44,6 +47,8 @@ The Feishu table needs a single-select field named `制作平台` with the optio
 ## Omni completion
 
 The Omni extension accepts only a public single-video Flow share URL. The server derives Google's MP4 preview endpoint, downloads the video, uploads it to the existing R2 archive, verifies the public R2 URL, then writes that URL to `视频地址` and marks the order complete. The original Flow share URL is stored in `去水印原始链接`.
+
+The batch web workbench can hold at most ten active locks. It prevents duplicate Flow video IDs in the current process, and every recovery, completion, and release request re-validates the Feishu record lock. `去水印原始链接` is written using Feishu's hyperlink object shape while the plain-text `视频地址` field remains a string.
 
 If extraction, upload, or public verification fails, the job reports `failed` but the Feishu order remains `接单中`. The original assignee can retry with the same or a corrected share URL, or release the order manually.
 
