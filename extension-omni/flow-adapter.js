@@ -24,11 +24,22 @@
     return visibleElements('button,[role="button"]', root).find((element) => predicate(cleanText(element), element)) || null;
   }
 
+  function pointerClick(element) {
+    if (!element || !element.isConnected) return false;
+    const id = `mailab-pointer-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    element.setAttribute('data-mailab-pointer-id', id);
+    const targetOrigin = window.location.origin === 'null' ? '*' : window.location.origin;
+    window.postMessage({ source: 'mailab-omni-extension', type: 'MAILAB_FLOW_POINTER_CLICK', id }, targetOrigin);
+    setTimeout(() => {
+      if (element.getAttribute('data-mailab-pointer-id') === id) element.removeAttribute('data-mailab-pointer-id');
+    }, 5000);
+    return true;
+  }
+
   function clickButton(predicate, root = document) {
     const button = findButton(predicate, root);
     if (!button) return false;
-    button.click();
-    return true;
+    return pointerClick(button);
   }
 
   function waitFor(check, { timeout = 15000, interval = 160, message = '等待 Flow 页面响应超时' } = {}) {
@@ -47,7 +58,8 @@
   }
 
   function getComposer() {
-    return visibleElements('[contenteditable="true"][role="textbox"]').find((element) => element.hasAttribute('data-slate-editor'))
+    return visibleElements('[contenteditable="true"][data-slate-editor]')[0]
+      || visibleElements('[contenteditable="true"][role="textbox"]').find((element) => element.hasAttribute('data-slate-editor'))
       || visibleElements('[contenteditable="true"][role="textbox"]')[0]
       || null;
   }
@@ -60,10 +72,16 @@
     return findButton((text) => /^(Image|Video)(\s*·|\s)/i.test(text) && /x[1-4]\b/i.test(text));
   }
 
+  function getParameterMenu() {
+    return visibleElements('[role="menu"]')
+      .find((element) => /\bVideo\b/i.test(cleanText(element)) && /\b(?:Ingredients|Frames)\b/i.test(cleanText(element)))
+      || null;
+  }
+
   async function clearComposer() {
     const clear = findButton((text) => /Clear prompt/i.test(text));
     if (clear) {
-      clear.click();
+      pointerClick(clear);
       await waitFor(() => {
         const editor = getComposer();
         const value = cleanText(editor).replace(/What do you want to create\?/i, '').trim();
@@ -80,30 +98,33 @@
   async function ensureOmniSettings() {
     let settings = getSettingsButton();
     if (!settings) throw new Error('找不到 Flow 视频参数按钮，请先回到项目 All Media 页面');
-    settings.click();
-    await waitFor(() => {
-      const body = cleanText(document.body);
-      return /\bVideo\b/.test(body) && (/Ingredients/.test(body) || /Frames/.test(body));
-    }, { timeout: 5000, message: 'Flow 参数菜单打开失败' });
+    let menu = getParameterMenu();
+    if (!menu) {
+      pointerClick(settings);
+      menu = await waitFor(() => getParameterMenu(), { timeout: 5000, message: 'Flow 参数菜单打开失败' });
+    }
 
-    clickButton((text, element) => /^Video$/i.test(text) && ['tab', 'button'].includes(element.getAttribute('role') || element.tagName.toLowerCase()));
+    clickButton((text, element) => /(?:^|\s)Video$/i.test(text) && ['tab', 'button'].includes(element.getAttribute('role') || element.tagName.toLowerCase()), menu);
     await new Promise((resolve) => setTimeout(resolve, 180));
-    clickButton((text) => /^Ingredients$/i.test(text));
+    menu = getParameterMenu() || menu;
+    clickButton((text) => /(?:^|\s)Ingredients$/i.test(text), menu);
     await new Promise((resolve) => setTimeout(resolve, 180));
-    clickButton((text) => /^x1$/i.test(text));
+    menu = getParameterMenu() || menu;
+    clickButton((text) => /^x1$/i.test(text), menu);
     await new Promise((resolve) => setTimeout(resolve, 180));
 
     if (!/Omni\s*(Flash)?/i.test(cleanText(document.body))) {
       const model = findButton((text) => /arrow_drop_down/i.test(text) && /(Veo|Video|Flash|Quality|Fast)/i.test(text));
-      model?.click();
+      if (model) pointerClick(model);
       const omni = await waitFor(
         () => findButton((text) => /^Omni(?:\s+Flash)?$/i.test(text) || /Omni\s+Flash/i.test(text)),
         { timeout: 4000, message: '当前没有找到 Omni Flash 模型，请手动切换后重试' }
       );
-      omni.click();
+      pointerClick(omni);
     }
 
-    settings.click();
+    settings = getSettingsButton() || settings;
+    if (getParameterMenu()) pointerClick(settings);
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
     await new Promise((resolve) => setTimeout(resolve, 260));
     settings = getSettingsButton();
@@ -125,7 +146,7 @@
   function openMediaPicker() {
     const button = findButton((text) => /^add_2\s+Create$/i.test(text));
     if (!button) throw new Error('找不到 Flow 素材添加按钮');
-    button.click();
+    pointerClick(button);
   }
 
   async function uploadAndAttach(blob, filename) {
@@ -143,12 +164,17 @@
       interval: 400,
       message: '图片上传超时，请检查 Flow 网络或手动上传'
     });
-    option.click();
-    const add = await waitFor(() => findButton((text) => /^Add to Prompt$/i.test(text)), {
+    pointerClick(option);
+    const add = await waitFor(() => {
+      if (option.getAttribute('aria-selected') !== 'true') return null;
+      const button = findButton((text) => /^Add to Prompt$/i.test(text));
+      if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return null;
+      return button;
+    }, {
       timeout: 5000,
       message: '图片已上传，但无法加入 Flow 提示区'
     });
-    add.click();
+    pointerClick(add);
     await waitFor(() => findButton((text) => /^cancel$/i.test(text)) || findButton((text) => /Clear prompt/i.test(text)), {
       timeout: 8000,
       message: 'Flow 没有确认参考图片'
@@ -158,8 +184,10 @@
   async function setSlatePrompt(prompt) {
     const value = String(prompt || '').trim();
     if (!value) throw new Error('当前任务没有提示词');
-    const editor = getComposer();
-    if (!editor) throw new Error('找不到 Flow 提示词输入框');
+    const editor = await waitFor(() => getComposer(), {
+      timeout: 10000,
+      message: '找不到 Flow 提示词输入框'
+    });
     editor.focus();
     const target = editor.querySelector('[data-slate-zero-width]')?.firstChild
       || editor.querySelector('[data-slate-string]')?.firstChild
@@ -214,7 +242,7 @@
     let submittedResolve;
     const submitted = new Promise((resolve) => { submittedResolve = resolve; });
     const result = (async () => {
-      create.click();
+      pointerClick(create);
       let root = null;
       try {
         root = await waitFor(() => generationCards().find((element) => !beforeCards.has(element)), {
@@ -246,12 +274,20 @@
       timeout: 45000,
       message: 'Flow 结果页没有出现 Share 按钮'
     });
-    share.click();
+    pointerClick(share);
     const dialog = await waitFor(() => visibleElements('[role="dialog"]')[0], {
       timeout: 8000,
       message: 'Flow 分享弹窗打开失败'
     });
-    dialog.querySelector('[role="switch"][aria-checked="true"]')?.click();
+    const includeInputs = dialog.querySelector('[role="switch"][aria-checked="true"]');
+    if (includeInputs) {
+      pointerClick(includeInputs);
+      await waitFor(() => {
+        const currentDialog = visibleElements('[role="dialog"]')[0];
+        const currentSwitch = currentDialog?.querySelector('[role="switch"]');
+        return !currentSwitch || currentSwitch.getAttribute('aria-checked') === 'false';
+      }, { timeout: 5000, message: 'Flow 分享输入项关闭失败' });
+    }
     const captured = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         window.removeEventListener('message', onMessage);
@@ -266,11 +302,15 @@
       };
       window.addEventListener('message', onMessage);
     });
-    const copy = await waitFor(() => findButton((text) => /Copy link/i.test(text), dialog), {
+    const copy = await waitFor(() => {
+      const currentDialog = visibleElements('[role="dialog"]')[0];
+      const button = currentDialog && findButton((text) => /Copy link/i.test(text), currentDialog);
+      return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true' ? button : null;
+    }, {
       timeout: 5000,
       message: 'Flow 分享弹窗没有 Copy link'
     });
-    copy.click();
+    pointerClick(copy);
     return captured;
   }
 

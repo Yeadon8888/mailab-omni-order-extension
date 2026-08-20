@@ -21,7 +21,7 @@ test.after(async () => {
   await browser?.close();
 });
 
-test('uploads image, writes Slate prompt, submits and maps generated edit link', async () => {
+test('opens pointer-driven Flow settings, uploads image, writes prompt and maps the generated edit link', async () => {
   const page = await browser.newPage();
   await page.setContent(`
     <style>
@@ -29,8 +29,8 @@ test('uploads image, writes Slate prompt, submits and maps generated edit link',
       #grid [role=button] { width:180px; height:180px; }
       [hidden] { display:none !important; }
     </style>
-    <button id="settings">Video · 720p · 10s crop_9_16 x1</button>
-    <div id="settings-menu" hidden>
+    <button id="settings" aria-haspopup="menu">Video · 720p · 10s crop_9_16 x1</button>
+    <div id="settings-menu" role="menu" hidden>
       <button role="tab">Video</button><button role="tab">Ingredients</button>
       <button>Omni Flash arrow_drop_down</button><button>x1</button>
     </div>
@@ -45,7 +45,7 @@ test('uploads image, writes Slate prompt, submits and maps generated edit link',
     <script>
       const settings = document.getElementById('settings');
       const settingsMenu = document.getElementById('settings-menu');
-      settings.addEventListener('click', () => { settingsMenu.hidden = !settingsMenu.hidden; });
+      settings.addEventListener('pointerdown', () => { settingsMenu.hidden = !settingsMenu.hidden; });
       let selected = false;
       let attached = false;
       const editor = document.querySelector('[data-slate-editor]');
@@ -55,14 +55,18 @@ test('uploads image, writes Slate prompt, submits and maps generated edit link',
         const name = event.target.files[0].name;
         setTimeout(() => {
           const option = document.createElement('div'); option.setAttribute('role','option'); option.textContent = name + ' Image';
-          option.addEventListener('click', () => { selected = true; option.setAttribute('aria-selected','true'); });
+          option.addEventListener('click', () => setTimeout(() => {
+            selected = true; option.setAttribute('aria-selected','true');
+          }, 120));
           document.getElementById('options').append(option);
         }, 30);
       });
       document.getElementById('add').addEventListener('click', () => { document.getElementById('picker').hidden = false; });
-      document.getElementById('add-prompt').addEventListener('click', () => {
+      document.getElementById('add-prompt').addEventListener('pointerdown', () => {
         if (!selected) return; attached = true; document.getElementById('picker').hidden = true;
-        const cancel = document.createElement('button'); cancel.textContent = 'cancel'; document.getElementById('composer').prepend(cancel); sync();
+        const cancel = document.createElement('button'); cancel.textContent = 'cancel'; document.getElementById('composer').prepend(cancel);
+        editor.style.display = 'none';
+        setTimeout(() => { editor.style.display = 'block'; sync(); }, 250);
       });
       editor.addEventListener('beforeinput', (event) => {
         if (event.inputType !== 'insertText') return; event.preventDefault();
@@ -76,6 +80,7 @@ test('uploads image, writes Slate prompt, submits and maps generated edit link',
       });
     </script>
   `);
+  await page.addScriptTag({ path: hookPath });
   await page.addScriptTag({ path: adapterPath });
 
   const result = await page.evaluate(async () => {

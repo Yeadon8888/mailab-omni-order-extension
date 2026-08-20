@@ -228,18 +228,22 @@
     }
   }
 
-  function enqueueAll() {
+  async function enqueueAll() {
     const candidates = state.orders.filter((order) => ['claimed', 'error'].includes(order.state));
     if (!candidates.length) return setNotice('没有可自动投喂的订单。', 'warn');
-    for (const order of candidates) enqueueOrder(order.recordId);
+    for (const order of candidates) {
+      feedQueue.push(order.recordId);
+      await patchLocal(order.recordId, { state: 'queued', message: '已进入自动投喂队列' });
+    }
+    processFeedQueue();
     setNotice(`已加入 ${candidates.length} 单。插件将逐条投喂，生成任务会并行等待。`, 'success');
   }
 
-  function enqueueOrder(recordId) {
+  async function enqueueOrder(recordId) {
     const order = getOrder(recordId);
     if (!order || !['claimed', 'error'].includes(order.state) || feedQueue.includes(recordId) || feedingIds.has(recordId)) return;
     feedQueue.push(recordId);
-    patchLocal(recordId, { state: 'queued', message: '已进入自动投喂队列' });
+    await patchLocal(recordId, { state: 'queued', message: '已进入自动投喂队列' });
     processFeedQueue();
   }
 

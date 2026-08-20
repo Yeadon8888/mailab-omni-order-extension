@@ -114,8 +114,8 @@ function projectFixture() {
     #grid [role=button] { width:180px; height:180px; }
     [hidden] { display:none !important; }
   </style></head><body>
-    <button id="settings">Video · 720p · 10s crop_9_16 x1</button>
-    <div id="settings-menu" hidden><button role="tab">Video</button><button role="tab">Ingredients</button><button>Omni Flash arrow_drop_down</button><button>x1</button></div>
+    <button id="settings" aria-haspopup="menu">Video · 720p · 10s crop_9_16 x1</button>
+    <div id="settings-menu" role="menu" hidden><button role="tab">Video</button><button role="tab">Ingredients</button><button>Omni Flash arrow_drop_down</button><button>x1</button></div>
     <input id="file" type="file" accept="image/*" hidden>
     <div id="grid"><div role="button"><a href="${projectUrl}/edit/22222222-2222-4222-8222-222222222222"></a><img alt="Video thumbnail"></div></div>
     <div id="picker" hidden><div id="options"></div><button id="add-prompt">Add to Prompt</button></div>
@@ -125,12 +125,12 @@ function projectFixture() {
     </div>
     <script>
       const settings=document.getElementById('settings'), menu=document.getElementById('settings-menu');
-      settings.onclick=()=>{menu.hidden=!menu.hidden};
+      settings.onpointerdown=()=>{menu.hidden=!menu.hidden};
       let selected=false, attached=false; const editor=document.querySelector('[data-slate-editor]'), create=document.getElementById('create');
       const sync=()=>create.setAttribute('aria-disabled',attached&&!editor.querySelector('[data-slate-placeholder]')?'false':'true');
-      document.getElementById('file').onchange=(event)=>{const name=event.target.files[0].name;setTimeout(()=>{const option=document.createElement('div');option.setAttribute('role','option');option.textContent=name+' Image';option.onclick=()=>{selected=true;option.setAttribute('aria-selected','true')};document.getElementById('options').append(option)},40)};
+      document.getElementById('file').onchange=(event)=>{const name=event.target.files[0].name;setTimeout(()=>{const option=document.createElement('div');option.setAttribute('role','option');option.textContent=name+' Image';option.onclick=()=>setTimeout(()=>{selected=true;option.setAttribute('aria-selected','true')},120);document.getElementById('options').append(option)},40)};
       document.getElementById('add').onclick=()=>{document.getElementById('picker').hidden=false};
-      document.getElementById('add-prompt').onclick=()=>{if(!selected)return;attached=true;document.getElementById('picker').hidden=true;const cancel=document.createElement('button');cancel.textContent='cancel';document.getElementById('composer').prepend(cancel);sync()};
+      document.getElementById('add-prompt').onpointerdown=()=>{if(!selected)return;attached=true;document.getElementById('picker').hidden=true;const cancel=document.createElement('button');cancel.textContent='cancel';document.getElementById('composer').prepend(cancel);sync()};
       editor.addEventListener('beforeinput',(event)=>{if(event.inputType!=='insertText')return;event.preventDefault();editor.innerHTML='<p data-slate-node="element"><span data-slate-node="text"><span data-slate-leaf="true"><span data-slate-string="true"></span></span></span></p>';editor.querySelector('[data-slate-string]').textContent=event.data;sync()});
       create.onclick=()=>{if(create.getAttribute('aria-disabled')==='true')return;const slot=document.createElement('div'),card=document.createElement('div');card.setAttribute('role','button');card.textContent='Generating 1%';slot.append(card);document.getElementById('grid').prepend(slot);setTimeout(()=>{card.textContent='';const link=document.createElement('a');link.href='${editUrl}';card.append(link)},100)};
     </script>
@@ -143,8 +143,11 @@ function shareFixture() {
     <div id="dialog" role="dialog" hidden><button role="switch" aria-checked="true">Include inputs</button><button id="copy">link Copy link</button></div>
     <script>
       document.getElementById('share').onclick=()=>{document.getElementById('dialog').hidden=false};
-      document.querySelector('[role=switch]').onclick=(event)=>event.currentTarget.setAttribute('aria-checked','false');
-      document.getElementById('copy').onclick=()=>navigator.clipboard.writeText('${shareUrl}').catch(()=>{});
+      document.querySelector('[role=switch]').onclick=(event)=>{const target=event.currentTarget;setTimeout(()=>target.setAttribute('aria-checked','false'),120)};
+      document.getElementById('copy').onclick=()=>{
+        if(document.querySelector('[role=switch]').getAttribute('aria-checked')==='true')return;
+        navigator.clipboard.writeText('${shareUrl}').catch(()=>{});
+      };
     </script>
   </body></html>`;
 }
