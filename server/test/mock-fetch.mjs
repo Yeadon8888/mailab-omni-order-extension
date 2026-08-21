@@ -42,7 +42,7 @@ function recordFields(recordId = 'rec1') {
       ...mutable
     };
   }
-  if (scenario === 'batch') {
+  if (['batch', 'data-not-ready'].includes(scenario)) {
     return {
       任务状态: '待接单',
       接单人: '',
@@ -97,10 +97,13 @@ globalThis.fetch = async (input, options = {}) => {
   }
 
   if (url.pathname.endsWith('/records') && method === 'GET') {
+    if (scenario === 'data-not-ready' && url.searchParams.has('view_id')) {
+      return json({ code: 1254007, msg: 'Data not ready, please try again later' });
+    }
     return json({
       code: 0,
       data: {
-        items: scenario === 'batch'
+        items: ['batch', 'data-not-ready'].includes(scenario)
           ? ['rec1', 'rec2', 'rec3', 'rec4', 'rec5'].map((recordId) => ({ record_id: recordId, fields: recordFields(recordId) }))
           : ['retry', 'claim'].includes(scenario) ? [{ record_id: 'rec1', fields: recordFields() }] : [],
         has_more: false

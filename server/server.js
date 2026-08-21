@@ -761,9 +761,8 @@ async function findPendingRecord() {
 async function getOrderStats() {
   requireFeishuConfig();
   const records = await listRecords();
-  const pendingRecords = await listPendingRecords();
   const counts = {
-    pending: pendingRecords.length,
+    pending: 0,
     inProgress: 0,
     done: 0,
     garbage: 0,
@@ -775,9 +774,7 @@ async function getOrderStats() {
     if (status === config.statuses.inProgress) counts.inProgress += 1;
     else if (status === config.statuses.done) counts.done += 1;
     else if (status === config.statuses.garbage) counts.garbage += 1;
-    else if (status === config.statuses.pending) {
-      // pending is counted from the dedicated view so the queue matches the Base UI.
-    }
+    else if (status === config.statuses.pending) counts.pending += 1;
     else counts.other += 1;
   }
   return { ok: true, counts };
@@ -1535,7 +1532,28 @@ async function listRecords() {
 
 async function listPendingRecords() {
   const viewId = await getPendingViewId();
-  return listRecordsByView(viewId);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await listRecordsByView(viewId);
+    } catch (error) {
+      if (!isFeishuDataNotReady(error)) {
+        throw error;
+      }
+      if (attempt === 0) {
+        await delay(250);
+      }
+    }
+  }
+
+  console.warn('Feishu pending view is not ready; falling back to table scan');
+  const records = await listRecords();
+  return records.filter((record) => (
+    fieldText(record.fields?.[config.fields.status]) === config.statuses.pending
+  ));
+}
+
+function isFeishuDataNotReady(error) {
+  return /data not ready|数据尚未准备好/i.test(publicError(error));
 }
 
 async function listRecordsByView(viewId = '') {

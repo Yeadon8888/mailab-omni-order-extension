@@ -226,6 +226,32 @@ test('Omni batch claim can be recovered and safely released with per-order locks
   assert.equal(released.failed, 0);
 });
 
+test('Feishu Data not ready does not block Omni batch claims or order stats', async (t) => {
+  const server = await startServer('data-not-ready');
+  t.after(() => server.stop());
+
+  const claimResponse = await fetch(`http://127.0.0.1:${server.port}/api/omni/claim-batch`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ assignee: 'fallback-tester', count: 1 })
+  });
+  assert.equal(claimResponse.status, 200);
+  const claimed = await claimResponse.json();
+  assert.equal(claimed.ok, true);
+  assert.equal(claimed.claimed, 1);
+  assert.doesNotMatch(String(claimed.error || ''), /Data not ready/i);
+
+  const statsResponse = await fetch(`http://127.0.0.1:${server.port}/api/stats`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}'
+  });
+  assert.equal(statsResponse.status, 200);
+  const stats = await statsResponse.json();
+  assert.equal(stats.ok, true);
+  assert.equal(stats.counts.total, 5);
+});
+
 test('the same Flow video cannot be bound to two batch orders', async (t) => {
   const server = await startServer('batch');
   t.after(() => server.stop());
