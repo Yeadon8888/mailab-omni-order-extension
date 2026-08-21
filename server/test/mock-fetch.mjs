@@ -97,15 +97,29 @@ globalThis.fetch = async (input, options = {}) => {
   }
 
   if (url.pathname.endsWith('/records') && method === 'GET') {
+    if (scenario === 'stats-counts') {
+      if (url.searchParams.get('page_size') !== '1') {
+        return json({ code: 1254299, msg: 'full table scan is too slow' });
+      }
+      const filter = url.searchParams.get('filter') || '';
+      const totals = { '待接单': 2, '接单中': 3, '已完成': 4, '垃圾任务': 1 };
+      const status = Object.keys(totals).find((value) => filter.includes(value));
+      return json({
+        code: 0,
+        data: { items: [], total: status ? totals[status] : 12, has_more: false }
+      });
+    }
     if (scenario === 'data-not-ready' && url.searchParams.has('view_id')) {
       return json({ code: 1254007, msg: 'Data not ready, please try again later' });
     }
+    const items = ['batch', 'data-not-ready'].includes(scenario)
+      ? ['rec1', 'rec2', 'rec3', 'rec4', 'rec5'].map((recordId) => ({ record_id: recordId, fields: recordFields(recordId) }))
+      : ['retry', 'claim'].includes(scenario) ? [{ record_id: 'rec1', fields: recordFields() }] : [];
     return json({
       code: 0,
       data: {
-        items: ['batch', 'data-not-ready'].includes(scenario)
-          ? ['rec1', 'rec2', 'rec3', 'rec4', 'rec5'].map((recordId) => ({ record_id: recordId, fields: recordFields(recordId) }))
-          : ['retry', 'claim'].includes(scenario) ? [{ record_id: 'rec1', fields: recordFields() }] : [],
+        items,
+        total: items.length,
         has_more: false
       }
     });

@@ -14,6 +14,7 @@ const FLOW_HOST = 'labs.google';
 const FLOW_SHARE_PATH = /^\/fx\/tools\/flow\/shared\/video\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/?$/i;
 const MAX_OMNI_BATCH_ORDERS = 10;
 const OMNI_FLOW_RESERVATION_TTL_MS = 24 * 60 * 60 * 1000;
+const ORDER_STATS_CACHE_TTL_MS = 30 * 1000;
 const archiveRetryCount = Math.max(0, Number.parseInt(
   env.OSS_ARCHIVE_RETRY_COUNT || (env.OSS_ARCHIVE_MAX_ATTEMPTS ? String((Number.parseInt(env.OSS_ARCHIVE_MAX_ATTEMPTS, 10) || 1) - 1) : '3'),
   10
@@ -89,6 +90,7 @@ const config = {
 };
 
 let tokenCache = { token: '', expiresAt: 0 };
+let orderStatsCache = { value: null, expiresAt: 0, refreshPromise: null };
 class AsyncMutex {
   constructor() {
     this.current = Promise.resolve();
@@ -760,24 +762,60 @@ async function findPendingRecord() {
 
 async function getOrderStats() {
   requireFeishuConfig();
-  const records = await listRecords();
-  const counts = {
-    pending: 0,
-    inProgress: 0,
-    done: 0,
-    garbage: 0,
-    other: 0,
-    total: records.length
-  };
-  for (const record of records) {
-    const status = fieldText(record.fields?.[config.fields.status]);
-    if (status === config.statuses.inProgress) counts.inProgress += 1;
-    else if (status === config.statuses.done) counts.done += 1;
-    else if (status === config.statuses.garbage) counts.garbage += 1;
-    else if (status === config.statuses.pending) counts.pending += 1;
-    else counts.other += 1;
+  if (orderStatsCache.value && Date.now() < orderStatsCache.expiresAt) {
+    return orderStatsCache.value;
   }
-  return { ok: true, counts };
+  if (orderStatsCache.value) {
+    void refreshOrderStats().catch((error) => {
+      console.warn('order stats background refresh failed:', publicError(error));
+    });
+    return orderStatsCache.value;
+  }
+  return refreshOrderStats();
+}
+
+async function refreshOrderStats() {
+  if (orderStatsCache.refreshPromise) {
+    return orderStatsCache.refreshPromise;
+  }
+  orderStatsCache.refreshPromise = loadOrderStats()
+    .then((value) => {
+      orderStatsCache.value = value;
+      orderStatsCache.expiresAt = Date.now() + ORDER_STATS_CACHE_TTL_MS;
+      return value;
+    })
+    .finally(() => {
+      orderStatsCache.refreshPromise = null;
+    });
+  return orderStatsCache.refreshPromise;
+}
+
+async function loadOrderStats() {
+  const token = await getTenantToken();
+  const [total, pending, inProgress, done, garbage] = await Promise.all([
+    countRecords('', token),
+    countRecords(statusFilter(config.statuses.pending), token),
+    countRecords(statusFilter(config.statuses.inProgress), token),
+    countRecords(statusFilter(config.statuses.done), token),
+    countRecords(statusFilter(config.statuses.garbage), token)
+  ]);
+  return {
+    ok: true,
+    counts: {
+      pending,
+      inProgress,
+      done,
+      garbage,
+      other: Math.max(0, total - pending - inProgress - done - garbage),
+      total
+    }
+  };
+}
+
+function statusFilter(status) {
+  const field = String(config.fields.status).replace(/\\/g, '\\\\').replace(/\]/g, '\\]');
+  const value = String(status).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return `CurrentValue.[${field}]="${value}"`;
 }
 
 async function retryUnarchivedVideos(body) {
@@ -1530,6 +1568,26 @@ async function listRecords() {
   return listRecordsByView('');
 }
 
+async function countRecords(filter, token) {
+  const url = new URL(`https://open.feishu.cn/open-apis/bitable/v1/apps/${config.appToken}/tables/${config.tableId}/records`);
+  url.searchParams.set('page_size', '1');
+  if (filter) {
+    url.searchParams.set('filter', filter);
+  }
+  const response = await fetch(url, {
+    headers: { authorization: `Bearer ${token}` }
+  });
+  const data = await response.json();
+  if (!response.ok || data.code !== 0) {
+    throw new Error(data.msg || `读取记录数量失败 HTTP ${response.status}`);
+  }
+  const total = Number(data.data?.total);
+  if (!Number.isFinite(total) || total < 0) {
+    throw new Error('飞书未返回有效的记录数量');
+  }
+  return total;
+}
+
 async function listPendingRecords() {
   const viewId = await getPendingViewId();
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1642,6 +1700,7 @@ async function updateRecord(recordId, fields) {
   if (!response.ok || data.code !== 0) {
     throw new Error(data.msg || `更新记录失败 HTTP ${response.status}`);
   }
+  orderStatsCache.expiresAt = 0;
   return data.data?.record || data.data;
 }
 

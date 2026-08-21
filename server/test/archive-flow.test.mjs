@@ -252,6 +252,27 @@ test('Feishu Data not ready does not block Omni batch claims or order stats', as
   assert.equal(stats.counts.total, 5);
 });
 
+test('order stats use Feishu totals instead of scanning the full table', async (t) => {
+  const server = await startServer('stats-counts');
+  t.after(() => server.stop());
+
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/stats`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}'
+  });
+  assert.equal(response.status, 200);
+  const stats = await response.json();
+  assert.deepEqual(stats.counts, {
+    pending: 2,
+    inProgress: 3,
+    done: 4,
+    garbage: 1,
+    other: 2,
+    total: 12
+  });
+});
+
 test('the same Flow video cannot be bound to two batch orders', async (t) => {
   const server = await startServer('batch');
   t.after(() => server.stop());
