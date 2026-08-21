@@ -273,6 +273,21 @@ test('order stats use Feishu totals instead of scanning the full table', async (
   });
 });
 
+test('order stats retry a transient Feishu Data not ready response', async (t) => {
+  const server = await startServer('stats-counts-retry');
+  t.after(() => server.stop());
+
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/stats`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}'
+  });
+  assert.equal(response.status, 200);
+  const stats = await response.json();
+  assert.equal(stats.ok, true);
+  assert.equal(stats.counts.total, 12);
+});
+
 test('the same Flow video cannot be bound to two batch orders', async (t) => {
   const server = await startServer('batch');
   t.after(() => server.stop());

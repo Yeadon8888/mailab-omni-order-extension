@@ -793,11 +793,11 @@ async function refreshOrderStats() {
 async function loadOrderStats() {
   const token = await getTenantToken();
   const [total, pending, inProgress, done, garbage] = await Promise.all([
-    countRecords('', token),
-    countRecords(statusFilter(config.statuses.pending), token),
-    countRecords(statusFilter(config.statuses.inProgress), token),
-    countRecords(statusFilter(config.statuses.done), token),
-    countRecords(statusFilter(config.statuses.garbage), token)
+    countRecords('', token, 0),
+    countRecords(statusFilter(config.statuses.pending), token, 150),
+    countRecords(statusFilter(config.statuses.inProgress), token, 300),
+    countRecords(statusFilter(config.statuses.done), token, 450),
+    countRecords(statusFilter(config.statuses.garbage), token, 600)
   ]);
   return {
     ok: true,
@@ -1568,24 +1568,34 @@ async function listRecords() {
   return listRecordsByView('');
 }
 
-async function countRecords(filter, token) {
+async function countRecords(filter, token, staggerMs = 0) {
+  if (staggerMs > 0) {
+    await delay(staggerMs);
+  }
   const url = new URL(`https://open.feishu.cn/open-apis/bitable/v1/apps/${config.appToken}/tables/${config.tableId}/records`);
   url.searchParams.set('page_size', '1');
   if (filter) {
     url.searchParams.set('filter', filter);
   }
-  const response = await fetch(url, {
-    headers: { authorization: `Bearer ${token}` }
-  });
-  const data = await response.json();
-  if (!response.ok || data.code !== 0) {
-    throw new Error(data.msg || `读取记录数量失败 HTTP ${response.status}`);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await fetch(url, {
+      headers: { authorization: `Bearer ${token}` }
+    });
+    const data = await response.json();
+    if (response.ok && data.code === 0) {
+      const total = Number(data.data?.total);
+      if (!Number.isFinite(total) || total < 0) {
+        throw new Error('飞书未返回有效的记录数量');
+      }
+      return total;
+    }
+    const error = new Error(data.msg || `读取记录数量失败 HTTP ${response.status}`);
+    if (!isFeishuDataNotReady(error) || attempt === 2) {
+      throw error;
+    }
+    await delay(400 * (attempt + 1));
   }
-  const total = Number(data.data?.total);
-  if (!Number.isFinite(total) || total < 0) {
-    throw new Error('飞书未返回有效的记录数量');
-  }
-  return total;
+  throw new Error('读取记录数量失败');
 }
 
 async function listPendingRecords() {

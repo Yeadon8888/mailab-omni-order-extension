@@ -7,6 +7,7 @@ const brokenR2Url = 'https://r2.test/mailab/videos/2026/07/20/rec1-deadbeefdeadb
 const flowShareUrl = 'https://labs.google/fx/tools/flow/shared/video/67064cd9-aff7-40cb-b501-521ffc7312cc';
 const flowSourceUrl = 'https://labs.google/fx/api/og-video/shared/67064cd9-aff7-40cb-b501-521ffc7312cc';
 const mutableFieldsByRecord = new Map();
+let statsCountAttempts = 0;
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -97,7 +98,11 @@ globalThis.fetch = async (input, options = {}) => {
   }
 
   if (url.pathname.endsWith('/records') && method === 'GET') {
-    if (scenario === 'stats-counts') {
+    if (['stats-counts', 'stats-counts-retry'].includes(scenario)) {
+      statsCountAttempts += 1;
+      if (scenario === 'stats-counts-retry' && statsCountAttempts === 1) {
+        return json({ code: 1254007, msg: 'Data not ready, please try again later' });
+      }
       if (url.searchParams.get('page_size') !== '1') {
         return json({ code: 1254299, msg: 'full table scan is too slow' });
       }
