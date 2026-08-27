@@ -136,7 +136,7 @@ const server = http.createServer(async (req, res) => {
         feishuConfigured: Boolean(config.feishuAppId && config.feishuAppSecret && config.appToken && config.tableId),
         archiveEnabled: config.archive.enabled,
         archiveConfigured: !config.archive.enabled || isArchiveConfigured(),
-        features: ['platform-claim', 'omni-complete', 'omni-batch', 'doubao-web-archive']
+        features: ['platform-claim', 'omni-complete', 'omni-batch', 'doubao-web-archive', 'multi-platform-order-web']
       });
       return;
     }
@@ -177,6 +177,11 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, result);
       return;
     }
+    if (url.pathname === '/api/order/claim-batch') {
+      const result = await claimMutex.runExclusive(() => claimPlatformBatch(body));
+      sendJson(res, 200, result);
+      return;
+    }
     if (url.pathname === '/api/stats') {
       const result = await getOrderStats();
       sendJson(res, 200, result);
@@ -212,8 +217,28 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, result);
       return;
     }
+    if (url.pathname === '/api/order/recover') {
+      const result = await recoverPlatformOrders(body);
+      sendJson(res, 200, result);
+      return;
+    }
+    if (url.pathname === '/api/order/complete') {
+      const result = await startPlatformComplete(body);
+      sendJson(res, 200, result);
+      return;
+    }
+    if (url.pathname === '/api/order/complete-status') {
+      const result = getPlatformCompleteStatus(body);
+      sendJson(res, 200, result);
+      return;
+    }
     if (url.pathname === '/api/omni/release-batch') {
       const result = await releaseOmniBatch(body);
+      sendJson(res, 200, result);
+      return;
+    }
+    if (url.pathname === '/api/order/release-batch') {
+      const result = await releasePlatformBatch(body);
       sendJson(res, 200, result);
       return;
     }
@@ -434,7 +459,7 @@ async function claimPendingRecord(pending, assignee, platform) {
     [config.fields.claimedAt]: Date.now(),
     [config.fields.lockId]: lockId,
     ...(platform ? { [config.fields.platform]: platform } : {}),
-    [config.fields.log]: appendLog(previousLog, `${assignee} 于 ${now}${platform ? ` 使用 ${platform} 插件` : ''}接单`)
+    [config.fields.log]: appendLog(previousLog, `${assignee} 于 ${now}${platform ? ` 使用 ${platform} 工作台` : ''}接单`)
   };
   await updateRecord(pending.record_id, fields);
 
@@ -457,8 +482,13 @@ async function claimPendingRecord(pending, assignee, platform) {
 }
 
 async function claimOmniBatch(body) {
+  return claimPlatformBatch({ ...body, platform: 'Omni' });
+}
+
+async function claimPlatformBatch(body) {
   requireFeishuConfig();
   const assignee = String(body?.assignee || '').trim();
+  const platform = normalizeClaimPlatform(body?.platform);
   const count = Number.parseInt(body?.count, 10);
   if (!assignee) {
     throw new Error('请输入接单人');
@@ -487,7 +517,7 @@ async function claimOmniBatch(body) {
 
   for (const pending of pendingRecords) {
     try {
-      const order = await claimPendingRecord(pending, assignee, 'Omni');
+      const order = await claimPendingRecord(pending, assignee, platform);
       orders.push(order);
     } catch (claimError) {
       error = publicError(claimError);
@@ -509,8 +539,13 @@ async function claimOmniBatch(body) {
 }
 
 async function recoverOmniOrders(body) {
+  return recoverPlatformOrders({ ...body, platform: 'Omni' });
+}
+
+async function recoverPlatformOrders(body) {
   requireFeishuConfig();
   const assignee = String(body?.assignee || '').trim();
+  const platform = normalizeClaimPlatform(body?.platform);
   const candidates = normalizeLockCandidates(body?.orders);
   if (!assignee) {
     throw new Error('请输入接单人');
@@ -525,9 +560,10 @@ async function recoverOmniOrders(body) {
     try {
       const record = await getRecord(candidate.recordId);
       const fields = record.fields || {};
+      const recordPlatform = fieldText(fields[config.fields.platform]);
       const ownsLock = fieldText(fields[config.fields.lockId]) === candidate.lockId
         && fieldText(fields[config.fields.assignee]) === assignee
-        && fieldText(fields[config.fields.platform]) === 'Omni';
+        && (!platform || !recordPlatform || recordPlatform === platform);
       const status = fieldText(fields[config.fields.status]);
       if (!ownsLock || ![config.statuses.inProgress, config.statuses.done].includes(status)) {
         missing.push({ recordId: candidate.recordId, reason: '订单已释放、锁已变化或不属于当前接单人' });
@@ -539,10 +575,11 @@ async function recoverOmniOrders(body) {
         recordId: candidate.recordId,
         lockId: candidate.lockId,
         assignee,
-        platform: 'Omni',
+        platform: recordPlatform,
         prompt: fieldText(fields[config.fields.prompt]),
         imageUrl: fieldText(fields[config.fields.imageUrl]),
-        flowShareUrl: fieldText(fields[config.fields.watermarkUrl]),
+        shareUrl: fieldText(fields[config.fields.watermarkUrl]),
+        flowShareUrl: recordPlatform === 'Omni' ? fieldText(fields[config.fields.watermarkUrl]) : '',
         videoUrl: fieldText(fields[config.fields.videoUrl]),
         status,
         state: status === config.statuses.done ? 'completed' : (job ? 'processing' : 'claimed'),
@@ -557,14 +594,19 @@ async function recoverOmniOrders(body) {
 }
 
 async function releaseOmniBatch(body) {
+  return releasePlatformBatch({ ...body, platform: 'Omni' });
+}
+
+async function releasePlatformBatch(body) {
   requireFeishuConfig();
   const assignee = String(body?.assignee || '').trim();
+  const platform = normalizeClaimPlatform(body?.platform);
   const candidates = normalizeLockCandidates(body?.orders);
   if (!assignee) {
     throw new Error('请输入接单人');
   }
   if (!candidates.length) {
-    throw new Error('没有可释放的 Omni 订单');
+    throw new Error('没有可释放的订单');
   }
 
   const results = [];
@@ -574,8 +616,8 @@ async function releaseOmniBatch(body) {
         recordId: candidate.recordId,
         lockId: candidate.lockId,
         assignee,
-        platform: 'Omni',
-        reason: '用户在 Omni 批量工作台释放任务'
+        platform,
+        reason: `用户在网页批量工作台释放任务`
       });
       results.push({ recordId: candidate.recordId, ok: true });
     } catch (error) {
@@ -606,6 +648,160 @@ function normalizeLockCandidates(value) {
     candidates.push({ recordId, lockId });
   }
   return candidates;
+}
+
+async function startPlatformComplete(body) {
+  const shareUrl = String(body?.shareUrl || body?.flowShareUrl || body?.watermarkUrl || body?.videoUrl || '').trim();
+  const detectedPlatform = normalizeFlowShareUrl(shareUrl) ? 'Omni' : (normalizeDoubaoThreadUrl(shareUrl) ? '豆包' : '');
+  const requestedPlatform = normalizeClaimPlatform(body?.platform);
+  const platform = detectedPlatform || requestedPlatform;
+  if (requestedPlatform && detectedPlatform && requestedPlatform !== detectedPlatform) {
+    throw new Error(`链接识别为 ${detectedPlatform}，与指定平台 ${requestedPlatform} 不一致`);
+  }
+  if (platform === 'Omni') {
+    const result = await startOmniComplete({
+      ...body,
+      flowShareUrl: shareUrl
+    });
+    return { ...result, platform };
+  }
+  if (platform === '豆包') {
+    const result = await startDoubaoOrderComplete({
+      ...body,
+      shareUrl
+    });
+    return { ...result, platform };
+  }
+  throw new Error('无法识别回填链接，请粘贴有效的 Omni Flow 或豆包公开分享链接');
+}
+
+function getPlatformCompleteStatus(body) {
+  const platform = normalizeClaimPlatform(body?.platform);
+  return getCompleteJobStatus(body, platform ? (platform === 'Omni' ? 'omni' : 'doubao') : '');
+}
+
+async function startDoubaoOrderComplete(body) {
+  requireFeishuConfig();
+  if (!config.archive.enabled || !config.archive.writeBack || !isArchiveConfigured()) {
+    throw new Error('豆包完成接口需要启用并配置 R2 归档与回填');
+  }
+
+  const recordId = String(body?.recordId || '').trim();
+  const lockId = String(body?.lockId || '').trim();
+  const assignee = String(body?.assignee || '').trim();
+  const shareUrl = normalizeDoubaoThreadUrl(body?.shareUrl || '');
+  const fallbackApi = extractFallbackApi(`fallback_api":"${String(body?.fallbackApi || '')}`);
+  if (!recordId || !lockId || !assignee || !shareUrl) {
+    throw new Error('缺少 recordId、lockId、接单人或有效的豆包公开分享链接');
+  }
+  if (!fallbackApi && config.watermarkProvider === 'zhuceka') {
+    throw new Error('当前豆包链接需要先在网页端完成区域解析');
+  }
+
+  const record = await getRecord(recordId);
+  assertLock(record, lockId, assignee);
+  const platform = fieldText(record.fields?.[config.fields.platform]);
+  if (platform && platform !== '豆包') {
+    throw new Error(`当前任务由 ${platform} 工作台领取，不能使用豆包完成`);
+  }
+
+  const existingJob = findRunningCompleteJob(recordId, lockId);
+  if (existingJob) {
+    return {
+      ok: true,
+      accepted: true,
+      jobId: existingJob.jobId,
+      status: existingJob.status,
+      message: existingJob.message
+    };
+  }
+
+  const jobId = crypto.randomUUID();
+  const job = {
+    jobId,
+    type: 'doubao',
+    recordId,
+    lockId,
+    assignee,
+    status: 'processing',
+    message: '正在解析豆包无水印视频',
+    error: '',
+    videoUrl: '',
+    shareUrl,
+    createdAt: Date.now(),
+    updatedAt: Date.now()
+  };
+  completeJobs.set(jobId, job);
+
+  try {
+    await updateRecord(recordId, {
+      [config.fields.watermarkUrl]: hyperlinkField(shareUrl),
+      [config.fields.platform]: '豆包',
+      [config.fields.lastError]: '',
+      [config.fields.log]: appendLog(
+        fieldText(record.fields?.[config.fields.log]),
+        `${assignee} 于 ${nowText()} 提交豆包视频解析与转存：${shareUrl}`
+      )
+    });
+    runDoubaoOrderCompleteJob(job, fallbackApi).catch((error) => {
+      console.error('doubao order complete failed', publicError(error));
+    });
+  } catch (error) {
+    completeJobs.delete(jobId);
+    throw error;
+  }
+
+  return { ok: true, accepted: true, jobId, status: job.status, message: job.message };
+}
+
+async function runDoubaoOrderCompleteJob(job, fallbackApi) {
+  try {
+    const videoUrl = fallbackApi
+      ? await resolveDoubaoThreadVideo(job.shareUrl, {
+        timeoutMs: 30000,
+        fetchImpl: createInjectedDoubaoFetch(fallbackApi)
+      })
+      : await runWatermarkRemoval(job.shareUrl);
+    if (!videoUrl) {
+      throw new Error('没有取得豆包无水印视频地址');
+    }
+    Object.assign(job, {
+      message: '已获取无水印视频，正在转存 R2',
+      updatedAt: Date.now()
+    });
+    const queued = queueVideoArchive({
+      recordId: job.recordId,
+      lockId: job.lockId,
+      assignee: job.assignee,
+      videoUrl,
+      source: 'doubao',
+      flowShareUrl: job.shareUrl,
+      completeJobId: job.jobId
+    });
+    if (!queued) {
+      throw new Error('该豆包视频已经在转存队列中');
+    }
+  } catch (error) {
+    Object.assign(job, {
+      status: 'failed',
+      message: '豆包解析或转存任务创建失败，订单保持接单中',
+      error: publicError(error),
+      updatedAt: Date.now()
+    });
+    const record = await getRecord(job.recordId).catch(() => null);
+    if (record) {
+      await updateRecord(job.recordId, {
+        [config.fields.lastError]: `豆包处理失败：${publicError(error)}`,
+        [config.fields.log]: appendLog(
+          fieldText(record.fields?.[config.fields.log]),
+          `${job.assignee} 于 ${nowText()} 豆包处理失败：${publicError(error)}`
+        )
+      }).catch(() => {});
+    }
+    const timer = setTimeout(() => completeJobs.delete(job.jobId), 30 * 60 * 1000);
+    timer.unref?.();
+    throw error;
+  }
 }
 
 async function startCompleteOrder(body) {
@@ -1376,20 +1572,22 @@ async function runVideoArchive({ recordId, lockId, assignee, videoUrl, source, f
   try {
     const archived = await archivePreparedVideoWithRetry(download, videoUrl, { recordId, assignee, source });
     const latest = await getRecord(recordId);
-    if (source === 'omni') {
+    if (['omni', 'doubao'].includes(source)) {
       assertLock(latest, lockId, assignee);
     }
     const writeBackText = config.archive.writeBack ? '；已回填 R2 视频地址' : '';
-    const sourceForLog = source === 'omni' && flowShareUrl ? flowShareUrl : videoUrl;
+    const sourceForLog = ['omni', 'doubao'].includes(source) && flowShareUrl ? flowShareUrl : videoUrl;
     const line = source === 'omni'
       ? `${assignee} 于 ${startedAt} 完成 Omni 视频转存：${archived.publicUrl}；Flow 分享链接：${sourceForLog}`
-      : `${assignee} 于 ${startedAt} 归档视频成功：${archived.publicUrl}；源地址：${sourceForLog}${writeBackText}`;
+      : source === 'doubao'
+        ? `${assignee} 于 ${startedAt} 完成豆包无水印视频转存：${archived.publicUrl}；豆包分享链接：${sourceForLog}`
+        : `${assignee} 于 ${startedAt} 归档视频成功：${archived.publicUrl}；源地址：${sourceForLog}${writeBackText}`;
     const fields = {
       [config.fields.status]: config.statuses.done,
       [config.fields.completedAt]: Date.now(),
       [config.fields.lastError]: '',
-      ...(source === 'omni' ? {
-        [config.fields.platform]: 'Omni',
+      ...(['omni', 'doubao'].includes(source) ? {
+        [config.fields.platform]: source === 'omni' ? 'Omni' : '豆包',
         [config.fields.watermarkUrl]: hyperlinkField(flowShareUrl)
       } : {}),
       [config.fields.log]: appendLog(fieldText(latest.fields?.[config.fields.log]), line)
@@ -1398,7 +1596,7 @@ async function runVideoArchive({ recordId, lockId, assignee, videoUrl, source, f
       fields[config.fields.videoUrl] = textUrlField(archived.publicUrl);
     }
     await updateRecord(recordId, fields);
-    finishOmniCompleteJob(completeJobId, {
+    finishCompleteJob(completeJobId, {
       status: 'completed',
       message: 'R2 转存成功，已回填飞书并完成订单',
       videoUrl: archived.publicUrl,
@@ -1407,7 +1605,7 @@ async function runVideoArchive({ recordId, lockId, assignee, videoUrl, source, f
   } catch (error) {
     const latest = await getRecord(recordId).catch(() => null);
     const line = `${assignee} 于 ${startedAt} 归档视频失败：${publicError(error)}`;
-    const stillOwnsOrder = source !== 'omni' || (
+    const stillOwnsOrder = !['omni', 'doubao'].includes(source) || (
       fieldText(latest?.fields?.[config.fields.lockId]) === lockId
       && fieldText(latest?.fields?.[config.fields.assignee]) === assignee
       && fieldText(latest?.fields?.[config.fields.status]) === config.statuses.inProgress
@@ -1420,7 +1618,7 @@ async function runVideoArchive({ recordId, lockId, assignee, videoUrl, source, f
         console.error('archive log update failed', updateError);
       });
     }
-    finishOmniCompleteJob(completeJobId, {
+    finishCompleteJob(completeJobId, {
       status: 'failed',
       message: 'R2 转存失败，订单保持接单中，可重试或释放',
       error: publicError(error)
@@ -1429,12 +1627,12 @@ async function runVideoArchive({ recordId, lockId, assignee, videoUrl, source, f
   }
 }
 
-function finishOmniCompleteJob(jobId, patch) {
+function finishCompleteJob(jobId, patch) {
   if (!jobId) {
     return;
   }
   const job = completeJobs.get(jobId);
-  if (!job || job.type !== 'omni') {
+  if (!job || !['omni', 'doubao'].includes(job.type)) {
     return;
   }
   Object.assign(job, patch, { updatedAt: Date.now() });

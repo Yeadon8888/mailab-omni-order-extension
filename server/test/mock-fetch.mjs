@@ -62,8 +62,8 @@ function recordFields(recordId = 'rec1') {
     视频地址: '',
     接单日志: '',
     接单锁ID: 'lock1',
-    制作平台: 'Omni',
-    去水印原始链接: flowShareUrl,
+    制作平台: scenario === 'doubao-order-success' ? '豆包' : 'Omni',
+    去水印原始链接: scenario === 'doubao-order-success' ? '' : flowShareUrl,
     ...mutable
   };
 }
@@ -145,7 +145,7 @@ globalThis.fetch = async (input, options = {}) => {
     });
   }
 
-  if (url.hostname.endsWith('.snssdk.com') && scenario === 'doubao-web-success') {
+  if (url.hostname.endsWith('.snssdk.com') && ['doubao-web-success', 'doubao-order-success'].includes(scenario)) {
     return json({
       video_info: {
         data: {
@@ -182,7 +182,7 @@ globalThis.fetch = async (input, options = {}) => {
   }
 
   if (url.href.startsWith('https://r2.test/')) {
-    if (['complete-success', 'omni-success', 'doubao-web-success'].includes(scenario)) {
+    if (['complete-success', 'omni-success', 'doubao-web-success', 'doubao-order-success'].includes(scenario)) {
       return new Response(new Uint8Array([0]), {
         status: 206,
         headers: { 'content-type': 'video/mp4' }

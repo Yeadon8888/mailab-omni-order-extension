@@ -115,6 +115,66 @@ async function waitForDoubaoWebJob(port, jobId, expectedStatus, timeoutMs = 2500
   return undefined;
 }
 
+async function waitForPlatformJob(port, jobId, platform, expectedStatus, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = await fetch(`http://127.0.0.1:${port}/api/order/complete-status`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jobId, platform })
+    });
+    const body = await response.json();
+    if (body.status === expectedStatus) return body;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return undefined;
+}
+
+test('multi-platform batch endpoint claims unclassified orders with independent locks', async (t) => {
+  const server = await startServer('batch');
+  t.after(() => server.stop());
+
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/order/claim-batch`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ assignee: 'tester', count: 2 })
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.orders.length, 2);
+  assert.equal(body.orders.every((order) => order.platform === '' && order.lockId), true);
+});
+
+test('Doubao order completes only after unwatermarked video is verified in R2 and written back', async (t) => {
+  const server = await startServer('doubao-order-success');
+  t.after(() => server.stop());
+
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/order/complete`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      recordId: 'rec1',
+      lockId: 'lock1',
+      assignee: 'tester',
+      shareUrl: 'https://www.doubao.com/thread/xeztYGDAgpoBksrMs',
+      fallbackApi: 'https://vas-lf-x.snssdk.com/video/fplay/mock?video_id=test'
+    })
+  });
+  assert.equal(response.status, 200);
+  const started = await response.json();
+  assert.equal(started.status, 'processing');
+  assert.equal(started.platform, '豆包');
+
+  const completed = await waitForPlatformJob(server.port, started.jobId, '豆包', 'completed');
+  assert.ok(completed, 'Doubao order job should complete after R2 verification');
+  assert.match(completed.videoUrl, /^https:\/\/r2\.test\/mailab\/videos\//);
+  const doneUpdate = await waitForUpdate(server.updatesPath, (fields) => fields['任务状态'] === '已完成');
+  assert.ok(doneUpdate, 'Feishu order should be marked completed');
+  assert.equal(doneUpdate['制作平台'], '豆包');
+  assert.match(doneUpdate['视频地址'], /^https:\/\/r2\.test\//);
+});
+
 test('standalone Doubao web archive returns only a verified R2 URL', async (t) => {
   const server = await startServer('doubao-web-success');
   t.after(() => server.stop());
