@@ -3,6 +3,7 @@ import fs from 'node:fs';
 const scenario = process.env.TEST_SCENARIO || 'complete';
 const updatesPath = process.env.TEST_UPDATES_PATH || '';
 const sourceUrl = 'https://source.test/video.mp4';
+const doubaoVideoUrl = 'https://v9-default.douyin.com/mock-video.mp4?lr=unwatermarked';
 const brokenR2Url = 'https://r2.test/mailab/videos/2026/07/20/rec1-deadbeefdeadbeef.mp4';
 const flowShareUrl = 'https://labs.google/fx/tools/flow/shared/video/67064cd9-aff7-40cb-b501-521ffc7312cc';
 const flowSourceUrl = 'https://labs.google/fx/api/og-video/shared/67064cd9-aff7-40cb-b501-521ffc7312cc';
@@ -144,6 +145,32 @@ globalThis.fetch = async (input, options = {}) => {
     });
   }
 
+  if (url.hostname.endsWith('.snssdk.com') && scenario === 'doubao-web-success') {
+    return json({
+      video_info: {
+        data: {
+          video_list: {
+            video_1: { main_url: doubaoVideoUrl, bitrate: 1000 }
+          }
+        }
+      }
+    });
+  }
+
+  if (url.href === doubaoVideoUrl) {
+    return new Response(new Uint8Array([0, 0, 0, 24]), {
+      status: 200,
+      headers: {
+        'content-type': 'video/mp4',
+        'content-length': '4'
+      }
+    });
+  }
+
+  if (url.hostname === 'api.zhuceka.cn' && scenario === 'doubao-web-success') {
+    return json({ code: 200, data: { video: sourceUrl }, msg: 'ok' });
+  }
+
   if (url.href === flowSourceUrl) {
     return new Response(new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112]), {
       status: 200,
@@ -155,7 +182,7 @@ globalThis.fetch = async (input, options = {}) => {
   }
 
   if (url.href.startsWith('https://r2.test/')) {
-    if (['complete-success', 'omni-success'].includes(scenario)) {
+    if (['complete-success', 'omni-success', 'doubao-web-success'].includes(scenario)) {
       return new Response(new Uint8Array([0]), {
         status: 206,
         headers: { 'content-type': 'video/mp4' }

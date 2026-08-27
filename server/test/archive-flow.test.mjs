@@ -42,6 +42,10 @@ async function startServer(scenario) {
       FEISHU_APP_TOKEN: 'base-token',
       FEISHU_TABLE_ID: 'table-id',
       MAILAB_ADMIN_KEY: 'admin-key',
+      DOUBAO_LOCAL_RESOLVE: 'false',
+      WATERMARK_PROVIDER: 'zhuceka',
+      ZHUCEKA_UID: 'test-uid',
+      ZHUCEKA_KEY: 'test-key',
       OSS_ARCHIVE_ENABLED: 'true',
       OSS_ARCHIVE_WRITE_BACK: 'true',
       OSS_ARCHIVE_RETRY_COUNT: '0',
@@ -95,6 +99,57 @@ async function waitForJob(port, jobId, expectedStatus, timeoutMs = 2500) {
   }
   return undefined;
 }
+
+async function waitForDoubaoWebJob(port, jobId, expectedStatus, timeoutMs = 2500) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = await fetch(`http://127.0.0.1:${port}/api/doubao/archive-status`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jobId })
+    });
+    const body = await response.json();
+    if (body.status === expectedStatus) return body;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return undefined;
+}
+
+test('standalone Doubao web archive returns only a verified R2 URL', async (t) => {
+  const server = await startServer('doubao-web-success');
+  t.after(() => server.stop());
+
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/doubao/archive`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      url: 'https://www.doubao.com/thread/xeztYGDAgpoBksrMs',
+      fallbackApi: 'https://vas-lf-x.snssdk.com/video/fplay/mock?video_id=test'
+    })
+  });
+  assert.equal(response.status, 202);
+  const started = await response.json();
+  assert.equal(started.status, 'processing');
+
+  const completed = await waitForDoubaoWebJob(server.port, started.jobId, 'completed');
+  assert.ok(completed, 'Doubao web archive job should complete');
+  assert.match(completed.videoUrl, /^https:\/\/r2\.test\/mailab\/videos\//);
+  assert.equal(completed.message, '转存完成，R2 直链已验证可访问');
+});
+
+test('standalone Doubao web archive rejects non-thread URLs', async (t) => {
+  const server = await startServer('doubao-web-success');
+  t.after(() => server.stop());
+
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/doubao/archive`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ url: 'https://example.com/not-doubao' })
+  });
+  assert.equal(response.status, 500);
+  const body = await response.json();
+  assert.match(body.error, /豆包公开分享链接/);
+});
 
 test('complete does not mark the Feishu task done before R2 is readable', async (t) => {
   const server = await startServer('complete');

@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { URL } from 'node:url';
-import { normalizeDoubaoThreadUrl, resolveDoubaoThreadVideo } from './doubao-thread-resolver.mjs';
+import { extractFallbackApi, normalizeDoubaoThreadUrl, resolveDoubaoThreadVideo } from './doubao-thread-resolver.mjs';
 
 const execFileAsync = promisify(execFile);
 const env = loadEnv();
@@ -16,6 +16,8 @@ const FLOW_SHARE_PATH = /^\/fx\/tools\/flow\/shared\/video\/([0-9a-f]{8}-[0-9a-f
 const MAX_OMNI_BATCH_ORDERS = 10;
 const OMNI_FLOW_RESERVATION_TTL_MS = 24 * 60 * 60 * 1000;
 const ORDER_STATS_CACHE_TTL_MS = 30 * 1000;
+const DOUBAO_WEB_JOB_TTL_MS = 60 * 60 * 1000;
+const DOUBAO_WEB_RATE_WINDOW_MS = 10 * 60 * 1000;
 const archiveRetryCount = Math.max(0, Number.parseInt(
   env.OSS_ARCHIVE_RETRY_COUNT || (env.OSS_ARCHIVE_MAX_ATTEMPTS ? String((Number.parseInt(env.OSS_ARCHIVE_MAX_ATTEMPTS, 10) || 1) - 1) : '3'),
   10
@@ -33,6 +35,8 @@ const config = {
   doubaoApiOrigin: env.DOUBAO_API_ORIGIN || 'https://api.sdtmp.com/tools/doubao',
   doubaoAuthToken: env.DOUBAO_AUTH_TOKEN || '',
   doubaoLocalResolve: String(env.DOUBAO_LOCAL_RESOLVE || 'true').toLowerCase() !== 'false',
+  doubaoHtmlProxyUrl: env.DOUBAO_HTML_PROXY_URL || '',
+  doubaoHtmlProxyKey: env.DOUBAO_HTML_PROXY_KEY || '',
   zhucekaApiUrl: env.ZHUCEKA_API_URL || 'https://api.zhuceka.cn/home/api',
   zhucekaUid: env.ZHUCEKA_UID || '',
   zhucekaKey: env.ZHUCEKA_KEY || '',
@@ -41,6 +45,7 @@ const config = {
   qsyUserAgent: env.QSY_USER_AGENT || '',
   qsyReferer: env.QSY_REFERER || 'https://servicewechat.com/wx760a946be06f096c/9/page-frame.html',
   testVideoUrl: env.MAILAB_TEST_VIDEO_URL || 'https://example.com/mailab-test-video.mp4',
+  doubaoWebRateLimit: Math.max(1, Number.parseInt(env.DOUBAO_WEB_RATE_LIMIT || '10', 10) || 10),
   writeWatermarkUrl: String(env.WRITE_WATERMARK_URL || 'false').toLowerCase() === 'true',
   licenseKeys: parseLicenseKeys(env.MAILAB_LICENSE_KEYS || ''),
   adminKey: env.MAILAB_ADMIN_KEY || '',
@@ -108,6 +113,8 @@ class AsyncMutex {
 const claimMutex = new AsyncMutex();
 const doubaoPolling = new Map();
 const completeJobs = new Map();
+const doubaoWebJobs = new Map();
+const doubaoWebRequests = new Map();
 const omniFlowReservations = new Map();
 const archiveQueue = [];
 const archiveQueuedKeys = new Set();
@@ -129,7 +136,7 @@ const server = http.createServer(async (req, res) => {
         feishuConfigured: Boolean(config.feishuAppId && config.feishuAppSecret && config.appToken && config.tableId),
         archiveEnabled: config.archive.enabled,
         archiveConfigured: !config.archive.enabled || isArchiveConfigured(),
-        features: ['platform-claim', 'omni-complete', 'omni-batch']
+        features: ['platform-claim', 'omni-complete', 'omni-batch', 'doubao-web-archive']
       });
       return;
     }
@@ -147,6 +154,16 @@ const server = http.createServer(async (req, res) => {
     const body = await readJson(req);
     if (url.pathname === '/api/license/verify') {
       const result = verifyLicense(body);
+      sendJson(res, 200, result);
+      return;
+    }
+    if (url.pathname === '/api/doubao/archive') {
+      const result = startDoubaoWebArchive(body, req);
+      sendJson(res, 202, result);
+      return;
+    }
+    if (url.pathname === '/api/doubao/archive-status') {
+      const result = getDoubaoWebArchiveStatus(body);
       sendJson(res, 200, result);
       return;
     }
@@ -216,6 +233,157 @@ const server = http.createServer(async (req, res) => {
 server.listen(config.port, () => {
   console.log(`MAILAB order server listening on http://127.0.0.1:${config.port}`);
 });
+
+function startDoubaoWebArchive(body, req) {
+  if (!config.archive.enabled || !isArchiveConfigured()) {
+    throw new Error('R2 转存服务尚未配置完成');
+  }
+  const shareUrl = normalizeDoubaoThreadUrl(body?.url);
+  if (!shareUrl) {
+    throw new Error('请粘贴有效的豆包公开分享链接（doubao.com/thread/...）');
+  }
+  const fallbackApi = extractFallbackApi(`fallback_api":"${String(body?.fallbackApi || '')}`);
+  enforceDoubaoWebRateLimit(clientIp(req));
+
+  const existing = [...doubaoWebJobs.values()].find((job) => (
+    job.shareUrl === shareUrl
+    && ['processing', 'completed'].includes(job.status)
+    && Date.now() - job.updatedAt < DOUBAO_WEB_JOB_TTL_MS
+  ));
+  if (existing) {
+    return doubaoWebJobResponse(existing);
+  }
+
+  const job = {
+    jobId: crypto.randomUUID(),
+    shareUrl,
+    fallbackApi,
+    status: 'processing',
+    stage: 'resolving',
+    message: '正在解析豆包公开分享页',
+    videoUrl: '',
+    error: '',
+    createdAt: Date.now(),
+    updatedAt: Date.now()
+  };
+  doubaoWebJobs.set(job.jobId, job);
+  runDoubaoWebArchive(job).catch((error) => {
+    console.error('doubao web archive failed', publicError(error));
+  });
+  return doubaoWebJobResponse(job);
+}
+
+function getDoubaoWebArchiveStatus(body) {
+  const jobId = String(body?.jobId || '').trim();
+  if (!jobId) {
+    throw new Error('缺少 jobId');
+  }
+  const job = doubaoWebJobs.get(jobId);
+  if (!job) {
+    return { ok: false, status: 'missing', error: '转存任务不存在或已过期' };
+  }
+  return doubaoWebJobResponse(job);
+}
+
+async function runDoubaoWebArchive(job) {
+  try {
+    updateDoubaoWebJob(job, {
+      stage: 'resolving',
+      message: '正在获取无水印视频地址'
+    });
+    const directUrl = job.fallbackApi
+      ? await resolveDoubaoThreadVideo(job.shareUrl, {
+        timeoutMs: 30000,
+        fetchImpl: createInjectedDoubaoFetch(job.fallbackApi)
+      })
+      : await runWatermarkRemoval(job.shareUrl);
+    updateDoubaoWebJob(job, {
+      stage: 'downloading',
+      message: '已获取视频，正在下载并准备转存'
+    });
+    const download = await startArchiveDownload(directUrl);
+    if (!download?.ok) {
+      throw download?.error || new Error('视频下载失败');
+    }
+    updateDoubaoWebJob(job, {
+      stage: 'uploading',
+      message: '正在上传到 R2 并验证公开直链'
+    });
+    const recordHash = crypto.createHash('sha256').update(job.shareUrl).digest('hex').slice(0, 16);
+    const archived = await archivePreparedVideoWithRetry(Promise.resolve(download), directUrl, {
+      recordId: `doubao-${recordHash}`,
+      assignee: 'doubao-web',
+      source: 'doubao-web'
+    });
+    updateDoubaoWebJob(job, {
+      status: 'completed',
+      stage: 'completed',
+      message: '转存完成，R2 直链已验证可访问',
+      videoUrl: archived.publicUrl
+    });
+  } catch (error) {
+    updateDoubaoWebJob(job, {
+      status: 'failed',
+      stage: 'failed',
+      message: '转存失败',
+      error: publicError(error)
+    });
+  } finally {
+    const timer = setTimeout(() => doubaoWebJobs.delete(job.jobId), DOUBAO_WEB_JOB_TTL_MS);
+    timer.unref?.();
+  }
+}
+
+function createInjectedDoubaoFetch(fallbackApi) {
+  return (input, options = {}) => {
+    if (normalizeDoubaoThreadUrl(String(input || ''))) {
+      return Promise.resolve(new Response(`fallback_api":"${fallbackApi}`, {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' }
+      }));
+    }
+    return fetch(input, options);
+  };
+}
+
+function updateDoubaoWebJob(job, patch) {
+  Object.assign(job, patch, { updatedAt: Date.now() });
+}
+
+function doubaoWebJobResponse(job) {
+  return {
+    ok: job.status !== 'failed',
+    jobId: job.jobId,
+    status: job.status,
+    stage: job.stage,
+    message: job.message,
+    videoUrl: job.videoUrl,
+    error: job.error,
+    updatedAt: job.updatedAt
+  };
+}
+
+function enforceDoubaoWebRateLimit(ip) {
+  const now = Date.now();
+  const recent = (doubaoWebRequests.get(ip) || []).filter((timestamp) => now - timestamp < DOUBAO_WEB_RATE_WINDOW_MS);
+  if (recent.length >= config.doubaoWebRateLimit) {
+    throw new Error('操作过于频繁，请十分钟后再试');
+  }
+  recent.push(now);
+  doubaoWebRequests.set(ip, recent);
+  if (doubaoWebRequests.size > 1000) {
+    for (const [key, timestamps] of doubaoWebRequests) {
+      if (!timestamps.some((timestamp) => now - timestamp < DOUBAO_WEB_RATE_WINDOW_MS)) {
+        doubaoWebRequests.delete(key);
+      }
+    }
+  }
+}
+
+function clientIp(req) {
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return forwarded || req.socket?.remoteAddress || 'unknown';
+}
 
 function verifyLicense(body) {
   const key = String(body?.key || '').trim();
@@ -956,7 +1124,10 @@ async function runWatermarkRemoval(watermarkUrl) {
   const publicDoubaoThreadUrl = config.doubaoLocalResolve ? normalizeDoubaoThreadUrl(watermarkUrl) : '';
   if (publicDoubaoThreadUrl) {
     try {
-      return await resolveDoubaoThreadVideo(publicDoubaoThreadUrl, { timeoutMs: 30000 });
+      return await resolveDoubaoThreadVideo(publicDoubaoThreadUrl, {
+        timeoutMs: 30000,
+        fetchImpl: fetchDoubaoResolverResource
+      });
     } catch (error) {
       console.warn(`[doubao-local] ${publicError(error)}；改用 ${config.watermarkProvider} 兜底`);
     }
@@ -968,6 +1139,20 @@ async function runWatermarkRemoval(watermarkUrl) {
     return runQsyWatermarkRemoval(watermarkUrl);
   }
   return runDoubaoWatermarkRemoval(watermarkUrl);
+}
+
+function fetchDoubaoResolverResource(input, options = {}) {
+  const targetUrl = String(input || '');
+  if (config.doubaoHtmlProxyUrl && normalizeDoubaoThreadUrl(targetUrl)) {
+    const proxyUrl = new URL(config.doubaoHtmlProxyUrl);
+    proxyUrl.searchParams.set('url', targetUrl);
+    const headers = new Headers(options.headers || {});
+    if (config.doubaoHtmlProxyKey) {
+      headers.set('x-auth-code', config.doubaoHtmlProxyKey);
+    }
+    return fetch(proxyUrl, { ...options, headers });
+  }
+  return fetch(input, options);
 }
 
 async function runDoubaoWatermarkRemoval(watermarkUrl) {
