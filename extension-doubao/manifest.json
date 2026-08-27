@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MAILAB GEN VIDEO",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "MAILAB 公网接单、素材复制、去水印回写飞书与豆包平台标记工具。",
   "icons": {
     "16": "icons/icon16.png",

@@ -6,6 +6,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { URL } from 'node:url';
+import { normalizeDoubaoThreadUrl, resolveDoubaoThreadVideo } from './doubao-thread-resolver.mjs';
 
 const execFileAsync = promisify(execFile);
 const env = loadEnv();
@@ -31,6 +32,7 @@ const config = {
   watermarkProvider: env.WATERMARK_PROVIDER || 'doubao',
   doubaoApiOrigin: env.DOUBAO_API_ORIGIN || 'https://api.sdtmp.com/tools/doubao',
   doubaoAuthToken: env.DOUBAO_AUTH_TOKEN || '',
+  doubaoLocalResolve: String(env.DOUBAO_LOCAL_RESOLVE || 'true').toLowerCase() !== 'false',
   zhucekaApiUrl: env.ZHUCEKA_API_URL || 'https://api.zhuceka.cn/home/api',
   zhucekaUid: env.ZHUCEKA_UID || '',
   zhucekaKey: env.ZHUCEKA_KEY || '',
@@ -951,6 +953,14 @@ function assertLock(record, lockId, assignee) {
 }
 
 async function runWatermarkRemoval(watermarkUrl) {
+  const publicDoubaoThreadUrl = config.doubaoLocalResolve ? normalizeDoubaoThreadUrl(watermarkUrl) : '';
+  if (publicDoubaoThreadUrl) {
+    try {
+      return await resolveDoubaoThreadVideo(publicDoubaoThreadUrl, { timeoutMs: 30000 });
+    } catch (error) {
+      console.warn(`[doubao-local] ${publicError(error)}；改用 ${config.watermarkProvider} 兜底`);
+    }
+  }
   if (config.watermarkProvider === 'zhuceka') {
     return runZhucekaWatermarkRemoval(watermarkUrl);
   }

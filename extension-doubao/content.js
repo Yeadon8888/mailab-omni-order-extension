@@ -430,7 +430,7 @@
             <div class="material-card"><span>图片预览</span><div class="image-frame"><div id="imageEmpty" class="empty">接单后显示图片</div><img id="taskImage" alt="" decoding="async" loading="eager" hidden></div></div>
           </div>
           <div class="finish-row">
-            <label><span>手动上传去水印视频链接</span><textarea id="watermarkInput" placeholder="作为备用方式：粘贴最终视频链接，例如 https://...mp4"></textarea></label>
+            <label><span>豆包分享链接或视频直链</span><textarea id="watermarkInput" placeholder="粘贴 https://www.doubao.com/thread/... 或最终 MP4 链接"></textarea></label>
             <button id="completeButton" class="primary" type="button" disabled>同步完成</button>
           </div>
           <div id="result" class="result" hidden></div>
@@ -701,8 +701,8 @@
   async function completeOrder() {
     const settings = saveSettings();
     if (!state.order?.recordId || !state.order?.lockId) return setStatus('请先接单。', 'error');
-    const videoUrl = normalizeHttpUrl(els.watermarkInput.value || '');
-    if (!videoUrl) {
+    const submittedUrl = normalizeHttpUrl(els.watermarkInput.value || '');
+    if (!submittedUrl) {
       setResult('请输入有效的视频链接。');
       return setStatus('视频链接无效，请检查后再试。', 'error');
     }
@@ -710,12 +710,14 @@
     setResult('正在同步视频地址到飞书...');
     setStatus('正在同步视频地址...', 'warn', { duration: 5000 });
     try {
+      const completion = await prepareCompletionUrl(submittedUrl);
       const data = await mailabApi('/api/complete', {
         recordId: state.order.recordId,
         lockId: state.order.lockId,
         assignee: settings.assignee,
-        videoUrl,
-        directComplete: true
+        ...(completion.direct
+          ? { videoUrl: completion.url, directComplete: true }
+          : { watermarkUrl: completion.url })
       });
       if (!data.ok) {
         const errorText = data.error || '同步失败';
@@ -737,6 +739,22 @@
       if (state.order) setBusy(els.completeButton, '同步完成', false);
       else els.completeButton.textContent = '同步完成';
     }
+  }
+
+  async function prepareCompletionUrl(url) {
+    const doubaoUrl = normalizeDoubaoUrl(url);
+    if (!doubaoUrl || !new URL(doubaoUrl).pathname.startsWith('/thread/')) {
+      return { url, direct: true };
+    }
+    setResult('正在浏览器内解析豆包无水印视频...');
+    setStatus('正在解析豆包分享链接...', 'warn', { duration: 6000 });
+    const response = await sendMessage({ type: 'DOUBAO_RESOLVE_THREAD', url: doubaoUrl });
+    const videoUrl = normalizeHttpUrl(response?.data?.videoUrl || '');
+    if (response?.ok && videoUrl) {
+      return { url: videoUrl, direct: true };
+    }
+    setStatus('浏览器解析失败，已改用后端去水印服务。', 'warn', { duration: 6000 });
+    return { url: doubaoUrl, direct: false };
   }
 
   async function releaseOrder() {

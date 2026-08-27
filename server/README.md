@@ -152,6 +152,12 @@ pm2 restart mailab-order-server
 
 ## Watermark Provider
 
+Public Doubao `/thread/` share links are resolved locally first. The server reads
+the page's `fallback_api`, requests the unwatermarked rendition, decodes the
+qAAB URL, and then continues through the existing R2 archive/write-back flow.
+Set `DOUBAO_LOCAL_RESOLVE=false` to disable this path and use only the configured
+provider.
+
 Set `WATERMARK_PROVIDER` in `.env`:
 
 - `zhuceka`: use `https://api.zhuceka.cn/home/api` and read `data.video` from the response. Requires `ZHUCEKA_UID` and `ZHUCEKA_KEY`.

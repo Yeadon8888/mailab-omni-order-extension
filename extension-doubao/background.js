@@ -11,6 +11,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((error) => sendResponse({ ok: false, error: error.message || "读取捕获结果失败" }));
     return true;
   }
+  if (message?.type === "DOUBAO_RESOLVE_THREAD") {
+    resolveDoubaoThreadShareUrl(message.url)
+      .then((videoUrl) => sendResponse({ ok: true, data: { videoUrl } }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || "豆包分享链接解析失败" }));
+    return true;
+  }
   return false;
 });
 
@@ -514,7 +520,88 @@ function decodeJsonEscapedFragment(value) {
       break;
     }
   }
-  return text.replace(/\\u0026/g, "&").replace(/\\\//g, "/");
+  return text.replace(/\\u0026/gi, "&").replace(/\\u002f/gi, "/").replace(/\\\//g, "/");
+}
+
+async function resolveDoubaoThreadShareUrl(value) {
+  const shareUrl = normalizeDoubaoThreadShareUrl(value);
+  if (!shareUrl) {
+    throw new Error("仅支持公开的豆包 /thread/ 分享链接");
+  }
+  const pageResponse = await fetch(shareUrl, {
+    method: "GET",
+    credentials: "omit",
+    headers: {
+      accept: "text/html,application/xhtml+xml",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36"
+    }
+  });
+  if (!pageResponse.ok) {
+    throw new Error(`豆包分享页请求失败 HTTP ${pageResponse.status}`);
+  }
+  const html = await pageResponse.text();
+  const fallbackApis = findDoubaoFallbackApisFromPageHtml(html);
+  if (!fallbackApis.length) {
+    throw new Error("公开分享页中没有 fallback_api");
+  }
+  for (const fallbackApi of fallbackApis) {
+    const videoUrl = await getDoubaoVideoUrlFromFallbackApi(fallbackApi);
+    if (isUnwatermarkedDoubaoVideoUrl(videoUrl)) {
+      return videoUrl;
+    }
+  }
+  throw new Error("豆包无水印视频直链解析失败");
+}
+
+function normalizeDoubaoThreadShareUrl(value) {
+  const match = String(value || "").trim().match(/https:\/\/www\.doubao\.com\/thread\/[^\s"'<>?#]+/i);
+  if (!match) {
+    return "";
+  }
+  try {
+    const url = new URL(match[0]);
+    if (url.protocol !== "https:" || url.hostname !== "www.doubao.com" || !/^\/thread\/[^/]+\/?$/.test(url.pathname)) {
+      return "";
+    }
+    return `${url.origin}${url.pathname.replace(/\/$/, "")}`;
+  } catch {
+    return "";
+  }
+}
+
+function findDoubaoFallbackApisFromPageHtml(html) {
+  const text = String(html || "");
+  const markerIndex = text.indexOf("fallback_api");
+  if (markerIndex < 0) {
+    return [];
+  }
+  const neighborhood = decodeJsonEscapedFragment(text.slice(Math.max(0, markerIndex - 1000), markerIndex + 8000))
+    .replace(/&amp;|&#38;|&#x26;/gi, "&");
+  const candidates = neighborhood.match(/https:\/\/[^\s"'<>\\]+/g) || [];
+  const apis = [];
+  for (const candidate of candidates) {
+    try {
+      const url = new URL(candidate);
+      if ((url.hostname === "snssdk.com" || url.hostname.endsWith(".snssdk.com")) && url.pathname.includes("/video/fplay/")) {
+        apis.push(url.toString());
+      }
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  return Array.from(new Set(apis));
+}
+
+function isUnwatermarkedDoubaoVideoUrl(value) {
+  if (!isHttpUrl(value)) {
+    return false;
+  }
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.searchParams.get("lr") === "unwatermarked";
+  } catch {
+    return false;
+  }
 }
 
 async function getDoubaoVideoUrlFromFallbackApi(fallbackApi) {
