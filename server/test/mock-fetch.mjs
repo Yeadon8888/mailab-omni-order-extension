@@ -44,7 +44,7 @@ function recordFields(recordId = 'rec1') {
       ...mutable
     };
   }
-  if (['batch', 'data-not-ready'].includes(scenario)) {
+  if (['batch', 'batch-100', 'data-not-ready'].includes(scenario)) {
     return {
       任务状态: '待接单',
       接单人: '',
@@ -118,8 +118,11 @@ globalThis.fetch = async (input, options = {}) => {
     if (scenario === 'data-not-ready' && url.searchParams.has('view_id')) {
       return json({ code: 1254007, msg: 'Data not ready, please try again later' });
     }
-    const items = ['batch', 'data-not-ready'].includes(scenario)
-      ? ['rec1', 'rec2', 'rec3', 'rec4', 'rec5'].map((recordId) => ({ record_id: recordId, fields: recordFields(recordId) }))
+    const items = ['batch', 'batch-100', 'data-not-ready'].includes(scenario)
+      ? Array.from(
+        { length: scenario === 'batch-100' ? 100 : 5 },
+        (_, index) => `rec${index + 1}`
+      ).map((recordId) => ({ record_id: recordId, fields: recordFields(recordId) }))
       : ['retry', 'claim'].includes(scenario) ? [{ record_id: 'rec1', fields: recordFields() }] : [];
     return json({
       code: 0,

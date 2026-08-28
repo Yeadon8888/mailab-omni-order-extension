@@ -146,6 +146,26 @@ test('multi-platform batch endpoint claims unclassified orders with independent 
   assert.equal(body.orders.every((order) => order.platform === '' && order.lockId), true);
 });
 
+test('multi-platform batch endpoint claims 100 orders with unique locks', async (t) => {
+  const server = await startServer('batch-100');
+  t.after(() => server.stop());
+
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/order/claim-batch`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ assignee: 'bulk-tester', count: 100 })
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.requested, 100);
+  assert.equal(body.claimed, 100);
+  assert.equal(body.partial, false);
+  assert.equal(body.orders.length, 100);
+  assert.equal(new Set(body.orders.map((order) => order.recordId)).size, 100);
+  assert.equal(new Set(body.orders.map((order) => order.lockId)).size, 100);
+});
+
 test('Doubao order completes only after unwatermarked video is verified in R2 and written back', async (t) => {
   const server = await startServer('doubao-order-success');
   t.after(() => server.stop());

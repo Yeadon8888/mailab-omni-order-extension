@@ -13,7 +13,8 @@ const env = loadEnv();
 const CLAIM_PLATFORMS = new Set(['豆包', 'Omni']);
 const FLOW_HOST = 'labs.google';
 const FLOW_SHARE_PATH = /^\/fx\/tools\/flow\/shared\/video\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/?$/i;
-const MAX_OMNI_BATCH_ORDERS = 10;
+const MAX_OMNI_BATCH_ORDERS = 100;
+const CLAIM_BATCH_CONCURRENCY = Math.max(1, Math.min(10, Number.parseInt(env.CLAIM_BATCH_CONCURRENCY || '5', 10) || 5));
 const OMNI_FLOW_RESERVATION_TTL_MS = 24 * 60 * 60 * 1000;
 const ORDER_STATS_CACHE_TTL_MS = 30 * 1000;
 const DOUBAO_WEB_JOB_TTL_MS = 60 * 60 * 1000;
@@ -497,7 +498,7 @@ async function claimPlatformBatch(body) {
     throw new Error(`批量接单数量必须是 1–${MAX_OMNI_BATCH_ORDERS}`);
   }
 
-  const orders = [];
+  let orders = [];
   let error = '';
   let pendingRecords = [];
   try {
@@ -515,15 +516,19 @@ async function claimPlatformBatch(body) {
     };
   }
 
-  for (const pending of pendingRecords) {
-    try {
-      const order = await claimPendingRecord(pending, assignee, platform);
-      orders.push(order);
-    } catch (claimError) {
-      error = publicError(claimError);
-      break;
+  const claimResults = await mapWithConcurrency(
+    pendingRecords,
+    CLAIM_BATCH_CONCURRENCY,
+    async (pending) => {
+      try {
+        return { ok: true, order: await claimPendingRecord(pending, assignee, platform) };
+      } catch (claimError) {
+        return { ok: false, error: publicError(claimError) };
+      }
     }
-  }
+  );
+  orders = claimResults.filter((result) => result.ok).map((result) => result.order);
+  error = claimResults.find((result) => !result.ok)?.error || '';
   if (orders.length < count && !error) {
     error = pendingRecords.length < count ? '当前待接单任务数量不足' : '部分任务未能完成加锁';
   }
@@ -536,6 +541,20 @@ async function claimPlatformBatch(body) {
     orders,
     error: orders.length ? error : (error || '暂无待接单任务')
   };
+}
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function run() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
+  return results;
 }
 
 async function recoverOmniOrders(body) {
@@ -554,9 +573,7 @@ async function recoverPlatformOrders(body) {
     return { ok: true, orders: [], missing: [] };
   }
 
-  const orders = [];
-  const missing = [];
-  for (const candidate of candidates) {
+  const recoveryResults = await mapWithConcurrency(candidates, CLAIM_BATCH_CONCURRENCY, async (candidate) => {
     try {
       const record = await getRecord(candidate.recordId);
       const fields = record.fields || {};
@@ -566,11 +583,10 @@ async function recoverPlatformOrders(body) {
         && (!platform || !recordPlatform || recordPlatform === platform);
       const status = fieldText(fields[config.fields.status]);
       if (!ownsLock || ![config.statuses.inProgress, config.statuses.done].includes(status)) {
-        missing.push({ recordId: candidate.recordId, reason: '订单已释放、锁已变化或不属于当前接单人' });
-        continue;
+        return { missing: { recordId: candidate.recordId, reason: '订单已释放、锁已变化或不属于当前接单人' } };
       }
       const job = findRunningCompleteJob(candidate.recordId, candidate.lockId);
-      orders.push({
+      return { order: {
         ok: true,
         recordId: candidate.recordId,
         lockId: candidate.lockId,
@@ -585,11 +601,13 @@ async function recoverPlatformOrders(body) {
         state: status === config.statuses.done ? 'completed' : (job ? 'processing' : 'claimed'),
         jobId: job?.jobId || '',
         message: status === config.statuses.done ? '已完成' : (job?.message || '已恢复接单状态')
-      });
+      } };
     } catch (error) {
-      missing.push({ recordId: candidate.recordId, reason: publicError(error) });
+      return { missing: { recordId: candidate.recordId, reason: publicError(error) } };
     }
-  }
+  });
+  const orders = recoveryResults.filter((result) => result.order).map((result) => result.order);
+  const missing = recoveryResults.filter((result) => result.missing).map((result) => result.missing);
   return { ok: true, orders, missing };
 }
 
@@ -609,8 +627,7 @@ async function releasePlatformBatch(body) {
     throw new Error('没有可释放的订单');
   }
 
-  const results = [];
-  for (const candidate of candidates) {
+  const results = await mapWithConcurrency(candidates, CLAIM_BATCH_CONCURRENCY, async (candidate) => {
     try {
       await releaseOrder({
         recordId: candidate.recordId,
@@ -619,11 +636,11 @@ async function releasePlatformBatch(body) {
         platform,
         reason: `用户在网页批量工作台释放任务`
       });
-      results.push({ recordId: candidate.recordId, ok: true });
+      return { recordId: candidate.recordId, ok: true };
     } catch (error) {
-      results.push({ recordId: candidate.recordId, ok: false, error: publicError(error) });
+      return { recordId: candidate.recordId, ok: false, error: publicError(error) };
     }
-  }
+  });
   return {
     ok: results.some((item) => item.ok),
     released: results.filter((item) => item.ok).length,
