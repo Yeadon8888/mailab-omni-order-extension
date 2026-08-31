@@ -450,7 +450,7 @@ async function claimOrder(body) {
   return claimPendingRecord(pending, assignee, platform);
 }
 
-async function claimPendingRecord(pending, assignee, platform) {
+async function claimPendingRecord(pending, assignee, platform, rowNumber = 0) {
   const lockId = crypto.randomUUID();
   const now = nowText();
   const previousLog = fieldText(pending.fields[config.fields.log]);
@@ -476,6 +476,7 @@ async function claimPendingRecord(pending, assignee, platform) {
     assignee,
     prompt: fieldText(confirmed.fields[config.fields.prompt]),
     imageUrl: fieldText(confirmed.fields[config.fields.imageUrl]),
+    ...(rowNumber ? { rowNumber } : {}),
     platform: fieldText(confirmed.fields[config.fields.platform]) || platform,
     status: fieldText(confirmed.fields[config.fields.status]),
     claimedAt: fieldText(confirmed.fields[config.fields.claimedAt])
@@ -490,7 +491,8 @@ async function claimPlatformBatch(body) {
   requireFeishuConfig();
   const assignee = String(body?.assignee || '').trim();
   const platform = normalizeClaimPlatform(body?.platform);
-  const count = Number.parseInt(body?.count, 10);
+  const rowNumbers = normalizeRequestedRowNumbers(body?.rowNumbers);
+  const count = rowNumbers.length || Number.parseInt(body?.count, 10);
   if (!assignee) {
     throw new Error('请输入接单人');
   }
@@ -500,11 +502,21 @@ async function claimPlatformBatch(body) {
 
   let orders = [];
   let error = '';
-  let pendingRecords = [];
+  let pendingEntries = [];
+  let missingRows = [];
   try {
-    pendingRecords = (await listPendingRecords())
-      .filter((record) => fieldText(record.fields?.[config.fields.status]) === config.statuses.pending)
-      .slice(0, count);
+    const availableRecords = (await listPendingRecords())
+      .filter((record) => fieldText(record.fields?.[config.fields.status]) === config.statuses.pending);
+    if (rowNumbers.length) {
+      pendingEntries = rowNumbers
+        .map((rowNumber) => ({ pending: availableRecords[rowNumber - 1], rowNumber }))
+        .filter((entry) => entry.pending);
+      missingRows = rowNumbers.filter((rowNumber) => !availableRecords[rowNumber - 1]);
+    } else {
+      pendingEntries = availableRecords
+        .slice(0, count)
+        .map((pending, index) => ({ pending, rowNumber: index + 1 }));
+    }
   } catch (listError) {
     return {
       ok: false,
@@ -517,11 +529,11 @@ async function claimPlatformBatch(body) {
   }
 
   const claimResults = await mapWithConcurrency(
-    pendingRecords,
+    pendingEntries,
     CLAIM_BATCH_CONCURRENCY,
-    async (pending) => {
+    async ({ pending, rowNumber }) => {
       try {
-        return { ok: true, order: await claimPendingRecord(pending, assignee, platform) };
+        return { ok: true, order: await claimPendingRecord(pending, assignee, platform, rowNumber) };
       } catch (claimError) {
         return { ok: false, error: publicError(claimError) };
       }
@@ -529,8 +541,12 @@ async function claimPlatformBatch(body) {
   );
   orders = claimResults.filter((result) => result.ok).map((result) => result.order);
   error = claimResults.find((result) => !result.ok)?.error || '';
+  if (missingRows.length) {
+    const detail = `待接单视图中找不到行号：${missingRows.join('、')}`;
+    error = error ? `${error}；${detail}` : detail;
+  }
   if (orders.length < count && !error) {
-    error = pendingRecords.length < count ? '当前待接单任务数量不足' : '部分任务未能完成加锁';
+    error = pendingEntries.length < count ? '当前待接单任务数量不足' : '部分任务未能完成加锁';
   }
 
   return {
@@ -541,6 +557,35 @@ async function claimPlatformBatch(body) {
     orders,
     error: orders.length ? error : (error || '暂无待接单任务')
   };
+}
+
+function normalizeRequestedRowNumbers(value) {
+  if (value == null || value === '') {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error('指定行号必须是数字列表');
+  }
+  const rows = [];
+  const seen = new Set();
+  for (const item of value) {
+    const text = String(item ?? '').trim();
+    if (!/^\d+$/.test(text)) {
+      throw new Error('指定行号只能包含正整数');
+    }
+    const rowNumber = Number.parseInt(text, 10);
+    if (!Number.isSafeInteger(rowNumber) || rowNumber < 1 || rowNumber > 1000000) {
+      throw new Error('指定行号超出有效范围');
+    }
+    if (!seen.has(rowNumber)) {
+      seen.add(rowNumber);
+      rows.push(rowNumber);
+    }
+    if (rows.length > MAX_OMNI_BATCH_ORDERS) {
+      throw new Error(`一次最多指定 ${MAX_OMNI_BATCH_ORDERS} 个行号`);
+    }
+  }
+  return rows;
 }
 
 async function mapWithConcurrency(items, concurrency, worker) {

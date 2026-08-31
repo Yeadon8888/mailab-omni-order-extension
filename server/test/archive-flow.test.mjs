@@ -146,6 +146,24 @@ test('multi-platform batch endpoint claims unclassified orders with independent 
   assert.equal(body.orders.every((order) => order.platform === '' && order.lockId), true);
 });
 
+test('multi-platform batch endpoint claims only the requested pending-view row numbers', async (t) => {
+  const server = await startServer('batch');
+  t.after(() => server.stop());
+
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/order/claim-batch`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ assignee: 'row-tester', count: 2, rowNumbers: [2, 4] })
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.requested, 2);
+  assert.equal(body.claimed, 2);
+  assert.deepEqual(body.orders.map((order) => order.recordId), ['rec2', 'rec4']);
+  assert.deepEqual(body.orders.map((order) => order.rowNumber), [2, 4]);
+});
+
 test('multi-platform batch endpoint claims 100 orders with unique locks', async (t) => {
   const server = await startServer('batch-100');
   t.after(() => server.stop());
