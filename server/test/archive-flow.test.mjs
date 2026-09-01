@@ -300,6 +300,27 @@ test('Doubao order falls back to the configured provider when the browser cannot
   assert.match(completed.videoUrl, /^https:\/\/r2\.test\/mailab\/videos\//);
 });
 
+test('Doubao order fails over when the preferred provider account is disabled', async (t) => {
+  const server = await startServer('doubao-provider-disabled-failover');
+  t.after(() => server.stop());
+
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/order/complete`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      recordId: 'rec1',
+      lockId: 'lock1',
+      assignee: 'tester',
+      shareUrl: 'https://www.doubao.com/thread/xto8Bs63rRB4J9xfr'
+    })
+  });
+  assert.equal(response.status, 200);
+  const started = await response.json();
+  const completed = await waitForPlatformJob(server.port, started.jobId, '豆包', 'completed');
+  assert.ok(completed, 'a disabled preferred provider should transparently fail over');
+  assert.match(completed.videoUrl, /^https:\/\/r2\.test\/mailab\/videos\//);
+});
+
 test('standalone Doubao web archive returns only a verified R2 URL', async (t) => {
   const server = await startServer('doubao-web-success');
   t.after(() => server.stop());

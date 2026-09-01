@@ -187,8 +187,16 @@ globalThis.fetch = async (input, options = {}) => {
     });
   }
 
+  if (url.hostname === 'api.zhuceka.cn' && scenario === 'doubao-provider-disabled-failover') {
+    return json({ code: 403, msg: '账号已禁用或不存在' });
+  }
+
   if (url.hostname === 'api.zhuceka.cn' && ['doubao-web-success', 'doubao-provider-fallback'].includes(scenario)) {
     return json({ code: 200, data: { video: sourceUrl }, msg: 'ok' });
+  }
+
+  if (url.hostname === 'api.sdtmp.com' && scenario === 'doubao-provider-disabled-failover') {
+    return json({ ok: true, status: 'succeeded', url: sourceUrl });
   }
 
   if (url.href === flowSourceUrl) {
@@ -202,7 +210,7 @@ globalThis.fetch = async (input, options = {}) => {
   }
 
   if (url.href.startsWith('https://r2.test/')) {
-    if (['complete-success', 'omni-success', 'doubao-web-success', 'doubao-order-success', 'doubao-provider-fallback'].includes(scenario)) {
+    if (['complete-success', 'omni-success', 'doubao-web-success', 'doubao-order-success', 'doubao-provider-fallback', 'doubao-provider-disabled-failover'].includes(scenario)) {
       return new Response(new Uint8Array([0]), {
         status: 206,
         headers: { 'content-type': 'video/mp4' }

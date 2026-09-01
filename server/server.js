@@ -1568,6 +1568,7 @@ function assertLock(record, lockId, assignee) {
 }
 
 async function runWatermarkRemoval(watermarkUrl) {
+  const errors = [];
   const publicDoubaoThreadUrl = config.doubaoLocalResolve ? normalizeDoubaoThreadUrl(watermarkUrl) : '';
   if (publicDoubaoThreadUrl) {
     try {
@@ -1576,16 +1577,23 @@ async function runWatermarkRemoval(watermarkUrl) {
         fetchImpl: fetchDoubaoResolverResource
       });
     } catch (error) {
+      errors.push(error);
       console.warn(`[doubao-local] ${publicError(error)}；改用 ${config.watermarkProvider} 兜底`);
     }
   }
-  if (config.watermarkProvider === 'zhuceka') {
-    return runZhucekaWatermarkRemoval(watermarkUrl);
+
+  const providers = [...new Set([config.watermarkProvider, 'doubao'])];
+  for (const provider of providers) {
+    try {
+      if (provider === 'zhuceka') return await runZhucekaWatermarkRemoval(watermarkUrl);
+      if (provider === 'qsy') return await runQsyWatermarkRemoval(watermarkUrl);
+      if (provider === 'doubao') return await runDoubaoWatermarkRemoval(watermarkUrl);
+    } catch (error) {
+      errors.push(error);
+      console.warn(`[doubao-provider:${provider}] ${publicError(error)}；尝试下一条线路`);
+    }
   }
-  if (config.watermarkProvider === 'qsy') {
-    return runQsyWatermarkRemoval(watermarkUrl);
-  }
-  return runDoubaoWatermarkRemoval(watermarkUrl);
+  throw errors.at(-1) || new Error('豆包去水印服务暂时不可用');
 }
 
 function fetchDoubaoResolverResource(input, options = {}) {
