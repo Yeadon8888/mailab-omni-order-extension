@@ -276,6 +276,30 @@ test('Doubao order completes only after unwatermarked video is verified in R2 an
   assert.match(doneUpdate['视频地址'], /^https:\/\/r2\.test\//);
 });
 
+test('Doubao order falls back to the configured provider when the browser cannot extract fallback_api', async (t) => {
+  const server = await startServer('doubao-provider-fallback');
+  t.after(() => server.stop());
+
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/order/complete`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      recordId: 'rec1',
+      lockId: 'lock1',
+      assignee: 'tester',
+      shareUrl: 'https://www.doubao.com/thread/xVy9XavoQmbpFO6Rw'
+    })
+  });
+  assert.equal(response.status, 200);
+  const started = await response.json();
+  assert.equal(started.status, 'processing');
+  assert.equal(started.platform, '豆包');
+
+  const completed = await waitForPlatformJob(server.port, started.jobId, '豆包', 'completed');
+  assert.ok(completed, 'provider fallback should archive and complete the order');
+  assert.match(completed.videoUrl, /^https:\/\/r2\.test\/mailab\/videos\//);
+});
+
 test('standalone Doubao web archive returns only a verified R2 URL', async (t) => {
   const server = await startServer('doubao-web-success');
   t.after(() => server.stop());

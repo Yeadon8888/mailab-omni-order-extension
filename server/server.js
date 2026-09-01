@@ -994,15 +994,8 @@ async function startDoubaoOrderComplete(body) {
   if (!recordId || !lockId || !assignee || !shareUrl) {
     throw new Error('缺少 recordId、lockId、接单人或有效的豆包公开分享链接');
   }
-  if (!fallbackApi && config.watermarkProvider === 'zhuceka') {
-    throw new Error('当前豆包链接需要先在网页端完成区域解析');
-  }
   const record = await getRecord(recordId);
   assertLock(record, lockId, assignee);
-  const platform = fieldText(record.fields?.[config.fields.platform]);
-  if (platform && platform !== '豆包') {
-    throw new Error(`当前任务由 ${platform} 工作台领取，不能使用豆包完成`);
-  }
   const existingJob = findRunningCompleteJob(recordId, lockId);
   if (existingJob) {
     return { ok: true, accepted: true, jobId: existingJob.jobId, status: existingJob.status, message: existingJob.message };
@@ -1132,11 +1125,6 @@ async function startOmniComplete(body) {
 
   const record = await getRecord(recordId);
   assertLock(record, lockId, assignee);
-  const platform = fieldText(record.fields?.[config.fields.platform]);
-  if (platform && platform !== 'Omni') {
-    throw new Error(`当前任务由 ${platform} 插件领取，不能使用 Omni 完成`);
-  }
-
   const existingJob = findRunningCompleteJob(recordId, lockId);
   if (existingJob) {
     if (flowShareUrl && existingJob.flowShareUrl && existingJob.flowShareUrl !== flowShareUrl) {

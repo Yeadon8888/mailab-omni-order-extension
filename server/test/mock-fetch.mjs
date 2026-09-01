@@ -187,7 +187,7 @@ globalThis.fetch = async (input, options = {}) => {
     });
   }
 
-  if (url.hostname === 'api.zhuceka.cn' && scenario === 'doubao-web-success') {
+  if (url.hostname === 'api.zhuceka.cn' && ['doubao-web-success', 'doubao-provider-fallback'].includes(scenario)) {
     return json({ code: 200, data: { video: sourceUrl }, msg: 'ok' });
   }
 
@@ -202,7 +202,7 @@ globalThis.fetch = async (input, options = {}) => {
   }
 
   if (url.href.startsWith('https://r2.test/')) {
-    if (['complete-success', 'omni-success', 'doubao-web-success', 'doubao-order-success'].includes(scenario)) {
+    if (['complete-success', 'omni-success', 'doubao-web-success', 'doubao-order-success', 'doubao-provider-fallback'].includes(scenario)) {
       return new Response(new Uint8Array([0]), {
         status: 206,
         headers: { 'content-type': 'video/mp4' }
