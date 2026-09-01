@@ -130,6 +130,69 @@ async function waitForPlatformJob(port, jobId, platform, expectedStatus, timeout
   return undefined;
 }
 
+async function waitForClaimJob(port, jobId, expectedStatus, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = await fetch(`http://127.0.0.1:${port}/api/order/claim-batch/status`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jobId })
+    });
+    const body = await response.json();
+    if (body.status === expectedStatus) return body;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return undefined;
+}
+
+test('asynchronous batch claim responds before slow Feishu confirmations and is idempotent', async (t) => {
+  const server = await startServer('batch-slow');
+  t.after(() => server.stop());
+
+  const payload = { assignee: 'async-tester', count: 5, clientRequestId: 'claim-request-1' };
+  const startedAt = Date.now();
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/order/claim-batch/start`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  assert.equal(response.status, 202);
+  assert.ok(Date.now() - startedAt < 300, 'start endpoint should not wait for Feishu confirmations');
+  const started = await response.json();
+  assert.equal(started.status, 'processing');
+  assert.ok(started.jobId);
+
+  const duplicate = await fetch(`http://127.0.0.1:${server.port}/api/order/claim-batch/start`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload)
+  }).then((item) => item.json());
+  assert.equal(duplicate.jobId, started.jobId);
+
+  const completed = await waitForClaimJob(server.port, started.jobId, 'completed');
+  assert.ok(completed);
+  assert.equal(completed.claimed, 5);
+  assert.deepEqual(completed.orders.map((order) => order.rowNumber), [1, 2, 3, 4, 5]);
+});
+
+test('assignee recovery restores an orphaned batch without browser lock data', async (t) => {
+  const server = await startServer('orphaned-batch');
+  t.after(() => server.stop());
+
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/order/recover-by-assignee`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ assignee: '也比', limit: 100 })
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.orders.length, 5);
+  assert.equal(body.orders.every((order) => order.lockId && order.state === 'claimed'), true);
+  assert.deepEqual(body.orders.map((order) => order.rowNumber), [1, 2, 3, 4, 5]);
+  assert.equal(body.orders.every((order) => order.rowNumberInferred === true), true);
+});
+
 test('multi-platform batch endpoint claims unclassified orders with independent locks', async (t) => {
   const server = await startServer('batch');
   t.after(() => server.stop());

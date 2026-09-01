@@ -19,6 +19,7 @@ const OMNI_FLOW_RESERVATION_TTL_MS = 24 * 60 * 60 * 1000;
 const ORDER_STATS_CACHE_TTL_MS = 30 * 1000;
 const DOUBAO_WEB_JOB_TTL_MS = 60 * 60 * 1000;
 const DOUBAO_WEB_RATE_WINDOW_MS = 10 * 60 * 1000;
+const CLAIM_BATCH_JOB_TTL_MS = 2 * 60 * 60 * 1000;
 const archiveRetryCount = Math.max(0, Number.parseInt(
   env.OSS_ARCHIVE_RETRY_COUNT || (env.OSS_ARCHIVE_MAX_ATTEMPTS ? String((Number.parseInt(env.OSS_ARCHIVE_MAX_ATTEMPTS, 10) || 1) - 1) : '3'),
   10
@@ -30,8 +31,9 @@ const config = {
   feishuAppSecret: env.FEISHU_APP_SECRET || '',
   appToken: env.FEISHU_APP_TOKEN || extractBaseToken(env.FEISHU_BASE_URL || ''),
   tableId: env.FEISHU_TABLE_ID || extractQuery(env.FEISHU_BASE_URL || '', 'table'),
-  pendingViewId: env.FEISHU_PENDING_VIEW_ID || '',
+  pendingViewId: env.FEISHU_PENDING_VIEW_ID || extractQuery(env.FEISHU_BASE_URL || '', 'view'),
   pendingViewName: env.FEISHU_PENDING_VIEW_NAME || '待接单',
+  includeInProgressStats: String(env.FEISHU_INCLUDE_IN_PROGRESS_STATS || 'false').toLowerCase() === 'true',
   watermarkProvider: env.WATERMARK_PROVIDER || 'doubao',
   doubaoApiOrigin: env.DOUBAO_API_ORIGIN || 'https://api.sdtmp.com/tools/doubao',
   doubaoAuthToken: env.DOUBAO_AUTH_TOKEN || '',
@@ -114,6 +116,8 @@ class AsyncMutex {
 const claimMutex = new AsyncMutex();
 const doubaoPolling = new Map();
 const completeJobs = new Map();
+const claimBatchJobs = new Map();
+const claimBatchRequestIds = new Map();
 const doubaoWebJobs = new Map();
 const doubaoWebRequests = new Map();
 const omniFlowReservations = new Map();
@@ -137,7 +141,10 @@ const server = http.createServer(async (req, res) => {
         feishuConfigured: Boolean(config.feishuAppId && config.feishuAppSecret && config.appToken && config.tableId),
         archiveEnabled: config.archive.enabled,
         archiveConfigured: !config.archive.enabled || isArchiveConfigured(),
-        features: ['platform-claim', 'omni-complete', 'omni-batch', 'doubao-web-archive', 'multi-platform-order-web']
+        features: [
+          'platform-claim', 'omni-complete', 'omni-batch', 'doubao-web-archive',
+          'multi-platform-order-web', 'async-batch-claim', 'assignee-recovery'
+        ]
       });
       return;
     }
@@ -183,6 +190,16 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, result);
       return;
     }
+    if (url.pathname === '/api/order/claim-batch/start') {
+      const result = startPlatformBatchClaim(body);
+      sendJson(res, 202, result);
+      return;
+    }
+    if (url.pathname === '/api/order/claim-batch/status') {
+      const result = getPlatformBatchClaimStatus(body);
+      sendJson(res, 200, result);
+      return;
+    }
     if (url.pathname === '/api/stats') {
       const result = await getOrderStats();
       sendJson(res, 200, result);
@@ -223,6 +240,11 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, result);
       return;
     }
+    if (url.pathname === '/api/order/recover-by-assignee') {
+      const result = await recoverPlatformOrdersByAssignee(body);
+      sendJson(res, 200, result);
+      return;
+    }
     if (url.pathname === '/api/order/complete') {
       const result = await startPlatformComplete(body);
       sendJson(res, 200, result);
@@ -230,6 +252,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/order/complete-status') {
       const result = getPlatformCompleteStatus(body);
+      sendJson(res, 200, result);
+      return;
+    }
+    if (url.pathname === '/api/omni/report-error') {
+      const result = await reportOmniAutomationError(body);
       sendJson(res, 200, result);
       return;
     }
@@ -460,11 +487,14 @@ async function claimPendingRecord(pending, assignee, platform, rowNumber = 0) {
     [config.fields.claimedAt]: Date.now(),
     [config.fields.lockId]: lockId,
     ...(platform ? { [config.fields.platform]: platform } : {}),
-    [config.fields.log]: appendLog(previousLog, `${assignee} 于 ${now}${platform ? ` 使用 ${platform} 工作台` : ''}接单`)
+    [config.fields.log]: appendLog(
+      previousLog,
+      `${assignee} 于 ${now}${platform ? ` 使用 ${platform} 工作台` : ''}接单${rowNumber ? ` · 待接单视图第 ${rowNumber} 行` : ''}`
+    )
   };
   await updateRecord(pending.record_id, fields);
 
-  const confirmed = await getRecord(pending.record_id);
+  const confirmed = await getRecordAfterClaim(pending.record_id, lockId);
   if (fieldText(confirmed.fields[config.fields.lockId]) !== lockId) {
     throw new Error('接单锁确认失败，请重试');
   }
@@ -481,6 +511,137 @@ async function claimPendingRecord(pending, assignee, platform, rowNumber = 0) {
     status: fieldText(confirmed.fields[config.fields.status]),
     claimedAt: fieldText(confirmed.fields[config.fields.claimedAt])
   };
+}
+
+async function getRecordAfterClaim(recordId, lockId) {
+  let lastError;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      const record = await getRecord(recordId);
+      if (fieldText(record.fields?.[config.fields.lockId]) === lockId || attempt === 3) {
+        return record;
+      }
+      lastError = new Error('飞书尚未同步接单锁');
+    } catch (error) {
+      lastError = error;
+      if (!isFeishuDataNotReady(error) && attempt === 3) throw error;
+    }
+    await delay(250 * (attempt + 1));
+  }
+  throw lastError || new Error('接单锁确认失败，请重试');
+}
+
+function startPlatformBatchClaim(body) {
+  requireFeishuConfig();
+  const assignee = String(body?.assignee || '').trim();
+  const platform = normalizeClaimPlatform(body?.platform);
+  const rowNumbers = normalizeRequestedRowNumbers(body?.rowNumbers);
+  const count = rowNumbers.length || Number.parseInt(body?.count, 10);
+  const clientRequestId = sanitizeClientRequestId(body?.clientRequestId);
+  if (!assignee) throw new Error('请输入接单人');
+  if (!Number.isInteger(count) || count < 1 || count > MAX_OMNI_BATCH_ORDERS) {
+    throw new Error(`批量接单数量必须是 1–${MAX_OMNI_BATCH_ORDERS}`);
+  }
+
+  cleanupClaimBatchJobs();
+  if (clientRequestId) {
+    const existingJobId = claimBatchRequestIds.get(clientRequestId);
+    const existing = existingJobId && claimBatchJobs.get(existingJobId);
+    if (existing) {
+      if (existing.assignee !== assignee) throw new Error('批量接单请求编号已被其他接单人使用');
+      return publicClaimBatchJob(existing);
+    }
+  }
+
+  const jobId = crypto.randomUUID();
+  const job = {
+    jobId,
+    clientRequestId,
+    assignee,
+    platform,
+    requested: count,
+    claimed: 0,
+    partial: false,
+    orders: [],
+    error: '',
+    status: 'processing',
+    message: '正在从飞书任务池接单',
+    createdAt: Date.now(),
+    updatedAt: Date.now()
+  };
+  claimBatchJobs.set(jobId, job);
+  if (clientRequestId) claimBatchRequestIds.set(clientRequestId, jobId);
+
+  setImmediate(() => {
+    claimMutex.runExclusive(() => claimPlatformBatch({ ...body, assignee, platform, count, rowNumbers }))
+      .then((result) => {
+        Object.assign(job, result, {
+          status: result.ok ? 'completed' : 'failed',
+          message: result.ok
+            ? `接单完成：成功 ${result.claimed} 单${result.partial ? '，部分任务未领取' : ''}`
+            : (result.error || '接单失败'),
+          updatedAt: Date.now(),
+          completedAt: Date.now()
+        });
+      })
+      .catch((error) => {
+        Object.assign(job, {
+          status: 'failed',
+          error: publicError(error),
+          message: publicError(error),
+          updatedAt: Date.now(),
+          completedAt: Date.now()
+        });
+      });
+  });
+  return publicClaimBatchJob(job);
+}
+
+function getPlatformBatchClaimStatus(body) {
+  cleanupClaimBatchJobs();
+  const jobId = String(body?.jobId || '').trim();
+  const job = claimBatchJobs.get(jobId);
+  if (!job) throw new Error('批量接单任务不存在或已过期，请按接单人恢复');
+  return publicClaimBatchJob(job);
+}
+
+function publicClaimBatchJob(job) {
+  return {
+    ok: job.status !== 'failed',
+    accepted: true,
+    jobId: job.jobId,
+    status: job.status,
+    assignee: job.assignee,
+    platform: job.platform,
+    requested: job.requested,
+    claimed: job.claimed,
+    partial: job.partial,
+    orders: job.orders,
+    error: job.error,
+    message: job.message,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    completedAt: job.completedAt || ''
+  };
+}
+
+function sanitizeClientRequestId(value) {
+  const requestId = String(value || '').trim();
+  if (!requestId) return '';
+  if (!/^[a-zA-Z0-9._:-]{8,128}$/.test(requestId)) throw new Error('批量接单请求编号无效');
+  return requestId;
+}
+
+function cleanupClaimBatchJobs() {
+  const threshold = Date.now() - CLAIM_BATCH_JOB_TTL_MS;
+  for (const [jobId, job] of claimBatchJobs) {
+    if (job.status !== 'processing' && job.updatedAt < threshold) {
+      claimBatchJobs.delete(jobId);
+      if (job.clientRequestId && claimBatchRequestIds.get(job.clientRequestId) === jobId) {
+        claimBatchRequestIds.delete(job.clientRequestId);
+      }
+    }
+  }
 }
 
 async function claimOmniBatch(body) {
@@ -630,23 +791,7 @@ async function recoverPlatformOrders(body) {
       if (!ownsLock || ![config.statuses.inProgress, config.statuses.done].includes(status)) {
         return { missing: { recordId: candidate.recordId, reason: '订单已释放、锁已变化或不属于当前接单人' } };
       }
-      const job = findRunningCompleteJob(candidate.recordId, candidate.lockId);
-      return { order: {
-        ok: true,
-        recordId: candidate.recordId,
-        lockId: candidate.lockId,
-        assignee,
-        platform: recordPlatform,
-        prompt: fieldText(fields[config.fields.prompt]),
-        imageUrl: fieldText(fields[config.fields.imageUrl]),
-        shareUrl: fieldText(fields[config.fields.watermarkUrl]),
-        flowShareUrl: recordPlatform === 'Omni' ? fieldText(fields[config.fields.watermarkUrl]) : '',
-        videoUrl: fieldText(fields[config.fields.videoUrl]),
-        status,
-        state: status === config.statuses.done ? 'completed' : (job ? 'processing' : 'claimed'),
-        jobId: job?.jobId || '',
-        message: status === config.statuses.done ? '已完成' : (job?.message || '已恢复接单状态')
-      } };
+      return { order: buildRecoveredOrder(record, assignee) };
     } catch (error) {
       return { missing: { recordId: candidate.recordId, reason: publicError(error) } };
     }
@@ -654,6 +799,106 @@ async function recoverPlatformOrders(body) {
   const orders = recoveryResults.filter((result) => result.order).map((result) => result.order);
   const missing = recoveryResults.filter((result) => result.missing).map((result) => result.missing);
   return { ok: true, orders, missing };
+}
+
+async function recoverPlatformOrdersByAssignee(body) {
+  requireFeishuConfig();
+  const assignee = String(body?.assignee || '').trim();
+  const platform = normalizeClaimPlatform(body?.platform);
+  const limit = clampNumber(Number(body?.limit || MAX_OMNI_BATCH_ORDERS), 1, MAX_OMNI_BATCH_ORDERS);
+  if (!assignee) throw new Error('请输入接单人');
+
+  const records = await listRecords();
+  const owned = records.filter((record) => {
+    const fields = record.fields || {};
+    const recordPlatform = fieldText(fields[config.fields.platform]);
+    return fieldText(fields[config.fields.assignee]) === assignee
+      && fieldText(fields[config.fields.status]) === config.statuses.inProgress
+      && Boolean(fieldText(fields[config.fields.lockId]))
+      && (!platform || !recordPlatform || recordPlatform === platform);
+  });
+  const sorted = owned.sort((a, b) => {
+    const aClaimed = Number(fieldText(a.fields?.[config.fields.claimedAt])) || 0;
+    const bClaimed = Number(fieldText(b.fields?.[config.fields.claimedAt])) || 0;
+    return aClaimed - bClaimed || String(a.record_id).localeCompare(String(b.record_id));
+  }).slice(-limit);
+  const orders = sorted.map((record, index) => {
+    const order = buildRecoveredOrder(record, assignee);
+    if (!order.rowNumber) {
+      order.rowNumber = index + 1;
+      order.rowNumberInferred = true;
+    }
+    return order;
+  });
+  return { ok: true, orders, recovered: orders.length };
+}
+
+function buildRecoveredOrder(record, assignee) {
+  const fields = record.fields || {};
+  const recordId = record.record_id;
+  const lockId = fieldText(fields[config.fields.lockId]);
+  const platform = fieldText(fields[config.fields.platform]);
+  const status = fieldText(fields[config.fields.status]);
+  const job = findRunningCompleteJob(recordId, lockId);
+  const rowNumber = extractClaimRowNumber(fieldText(fields[config.fields.log]));
+  return {
+    ok: true,
+    recordId,
+    lockId,
+    assignee,
+    platform,
+    prompt: fieldText(fields[config.fields.prompt]),
+    imageUrl: fieldText(fields[config.fields.imageUrl]),
+    shareUrl: fieldText(fields[config.fields.watermarkUrl]),
+    flowShareUrl: platform === 'Omni' ? fieldText(fields[config.fields.watermarkUrl]) : '',
+    videoUrl: fieldText(fields[config.fields.videoUrl]),
+    status,
+    claimedAt: fieldText(fields[config.fields.claimedAt]),
+    ...(rowNumber ? { rowNumber } : {}),
+    state: status === config.statuses.done ? 'completed' : (job ? 'processing' : 'claimed'),
+    jobId: job?.jobId || '',
+    message: status === config.statuses.done ? '已完成' : (job?.message || '已恢复接单状态')
+  };
+}
+
+function extractClaimRowNumber(logText) {
+  const matches = [...String(logText || '').matchAll(/待接单视图第\s*(\d+)\s*行/g)];
+  const rowNumber = Number.parseInt(matches.at(-1)?.[1] || '', 10);
+  return Number.isSafeInteger(rowNumber) && rowNumber > 0 ? rowNumber : 0;
+}
+
+async function reportOmniAutomationError(body) {
+  requireFeishuConfig();
+  const recordId = String(body?.recordId || '').trim();
+  const lockId = String(body?.lockId || '').trim();
+  const assignee = String(body?.assignee || '').trim();
+  const stage = sanitizeLogPart(body?.stage || 'automation');
+  const error = sanitizeLogPart(body?.error || body?.message || '自动化失败', 320);
+  if (!recordId || !lockId || !assignee || !error) {
+    throw new Error('缺少 recordId、lockId、接单人或错误信息');
+  }
+
+  const record = await getRecord(recordId);
+  assertLock(record, lockId, assignee);
+  const platform = fieldText(record.fields?.[config.fields.platform]);
+  if (platform && platform !== 'Omni') {
+    throw new Error(`当前任务由 ${platform} 插件领取，不能写入 Omni 自动化错误`);
+  }
+
+  const detailParts = [
+    `阶段：${stage}`,
+    `错误：${error}`,
+    body?.flowCredits == null ? '' : `Flow积分：${sanitizeLogPart(body.flowCredits, 40)}`,
+    body?.videoQuota == null ? '' : `视频额度：${sanitizeLogPart(body.videoQuota, 40)}`,
+    body?.editUrl ? `编辑页：${sanitizeLogPart(body.editUrl, 240)}` : '',
+    body?.shareUrl ? `分享链接：${sanitizeLogPart(body.shareUrl, 240)}` : ''
+  ].filter(Boolean);
+  const logLine = `${assignee} 于 ${nowText()} 上报 Omni 自动化失败：${detailParts.join('；')}`;
+  await updateRecord(recordId, {
+    [config.fields.lastError]: `Omni 自动化失败：${stage}：${error}`,
+    [config.fields.log]: appendLog(fieldText(record.fields?.[config.fields.log]), logLine)
+  });
+  return { ok: true, recordId, stage, error };
 }
 
 async function releaseOmniBatch(body) {
@@ -679,7 +924,7 @@ async function releasePlatformBatch(body) {
         lockId: candidate.lockId,
         assignee,
         platform,
-        reason: `用户在网页批量工作台释放任务`
+        reason: '用户在网页批量工作台释放任务'
       });
       return { recordId: candidate.recordId, ok: true };
     } catch (error) {
@@ -721,17 +966,11 @@ async function startPlatformComplete(body) {
     throw new Error(`链接识别为 ${detectedPlatform}，与指定平台 ${requestedPlatform} 不一致`);
   }
   if (platform === 'Omni') {
-    const result = await startOmniComplete({
-      ...body,
-      flowShareUrl: shareUrl
-    });
+    const result = await startOmniComplete({ ...body, flowShareUrl: shareUrl });
     return { ...result, platform };
   }
   if (platform === '豆包') {
-    const result = await startDoubaoOrderComplete({
-      ...body,
-      shareUrl
-    });
+    const result = await startDoubaoOrderComplete({ ...body, shareUrl });
     return { ...result, platform };
   }
   throw new Error('无法识别回填链接，请粘贴有效的 Omni Flow 或豆包公开分享链接');
@@ -747,7 +986,6 @@ async function startDoubaoOrderComplete(body) {
   if (!config.archive.enabled || !config.archive.writeBack || !isArchiveConfigured()) {
     throw new Error('豆包完成接口需要启用并配置 R2 归档与回填');
   }
-
   const recordId = String(body?.recordId || '').trim();
   const lockId = String(body?.lockId || '').trim();
   const assignee = String(body?.assignee || '').trim();
@@ -759,105 +997,60 @@ async function startDoubaoOrderComplete(body) {
   if (!fallbackApi && config.watermarkProvider === 'zhuceka') {
     throw new Error('当前豆包链接需要先在网页端完成区域解析');
   }
-
   const record = await getRecord(recordId);
   assertLock(record, lockId, assignee);
   const platform = fieldText(record.fields?.[config.fields.platform]);
   if (platform && platform !== '豆包') {
     throw new Error(`当前任务由 ${platform} 工作台领取，不能使用豆包完成`);
   }
-
   const existingJob = findRunningCompleteJob(recordId, lockId);
   if (existingJob) {
-    return {
-      ok: true,
-      accepted: true,
-      jobId: existingJob.jobId,
-      status: existingJob.status,
-      message: existingJob.message
-    };
+    return { ok: true, accepted: true, jobId: existingJob.jobId, status: existingJob.status, message: existingJob.message };
   }
-
   const jobId = crypto.randomUUID();
   const job = {
-    jobId,
-    type: 'doubao',
-    recordId,
-    lockId,
-    assignee,
-    status: 'processing',
-    message: '正在解析豆包无水印视频',
-    error: '',
-    videoUrl: '',
-    shareUrl,
-    createdAt: Date.now(),
-    updatedAt: Date.now()
+    jobId, type: 'doubao', recordId, lockId, assignee,
+    status: 'processing', message: '正在解析豆包无水印视频', error: '', videoUrl: '', shareUrl,
+    createdAt: Date.now(), updatedAt: Date.now()
   };
   completeJobs.set(jobId, job);
-
   try {
     await updateRecord(recordId, {
       [config.fields.watermarkUrl]: hyperlinkField(shareUrl),
       [config.fields.platform]: '豆包',
       [config.fields.lastError]: '',
-      [config.fields.log]: appendLog(
-        fieldText(record.fields?.[config.fields.log]),
-        `${assignee} 于 ${nowText()} 提交豆包视频解析与转存：${shareUrl}`
-      )
+      [config.fields.log]: appendLog(fieldText(record.fields?.[config.fields.log]), `${assignee} 于 ${nowText()} 提交豆包视频解析与转存：${shareUrl}`)
     });
-    runDoubaoOrderCompleteJob(job, fallbackApi).catch((error) => {
-      console.error('doubao order complete failed', publicError(error));
-    });
+    runDoubaoOrderCompleteJob(job, fallbackApi).catch((error) => console.error('doubao order complete failed', publicError(error)));
   } catch (error) {
     completeJobs.delete(jobId);
     throw error;
   }
-
   return { ok: true, accepted: true, jobId, status: job.status, message: job.message };
 }
 
 async function runDoubaoOrderCompleteJob(job, fallbackApi) {
   try {
     const videoUrl = fallbackApi
-      ? await resolveDoubaoThreadVideo(job.shareUrl, {
-        timeoutMs: 30000,
-        fetchImpl: createInjectedDoubaoFetch(fallbackApi)
-      })
+      ? await resolveDoubaoThreadVideo(job.shareUrl, { timeoutMs: 30000, fetchImpl: createInjectedDoubaoFetch(fallbackApi) })
       : await runWatermarkRemoval(job.shareUrl);
-    if (!videoUrl) {
-      throw new Error('没有取得豆包无水印视频地址');
-    }
-    Object.assign(job, {
-      message: '已获取无水印视频，正在转存 R2',
-      updatedAt: Date.now()
-    });
+    if (!videoUrl) throw new Error('没有取得豆包无水印视频地址');
+    Object.assign(job, { message: '已获取无水印视频，正在转存 R2', updatedAt: Date.now() });
     const queued = queueVideoArchive({
-      recordId: job.recordId,
-      lockId: job.lockId,
-      assignee: job.assignee,
-      videoUrl,
-      source: 'doubao',
-      flowShareUrl: job.shareUrl,
-      completeJobId: job.jobId
+      recordId: job.recordId, lockId: job.lockId, assignee: job.assignee,
+      videoUrl, source: 'doubao', flowShareUrl: job.shareUrl, completeJobId: job.jobId
     });
-    if (!queued) {
-      throw new Error('该豆包视频已经在转存队列中');
-    }
+    if (!queued) throw new Error('该豆包视频已经在转存队列中');
   } catch (error) {
     Object.assign(job, {
-      status: 'failed',
-      message: '豆包解析或转存任务创建失败，订单保持接单中',
-      error: publicError(error),
-      updatedAt: Date.now()
+      status: 'failed', message: '豆包解析或转存任务创建失败，订单保持接单中',
+      error: publicError(error), updatedAt: Date.now()
     });
     const record = await getRecord(job.recordId).catch(() => null);
     if (record) {
       await updateRecord(job.recordId, {
         [config.fields.lastError]: `豆包处理失败：${publicError(error)}`,
-        [config.fields.log]: appendLog(
-          fieldText(record.fields?.[config.fields.log]),
-          `${job.assignee} 于 ${nowText()} 豆包处理失败：${publicError(error)}`
-        )
+        [config.fields.log]: appendLog(fieldText(record.fields?.[config.fields.log]), `${job.assignee} 于 ${nowText()} 豆包处理失败：${publicError(error)}`)
       }).catch(() => {});
     }
     const timer = setTimeout(() => completeJobs.delete(job.jobId), 30 * 60 * 1000);
@@ -931,9 +1124,10 @@ async function startOmniComplete(body) {
   const recordId = String(body?.recordId || '').trim();
   const lockId = String(body?.lockId || '').trim();
   const assignee = String(body?.assignee || '').trim();
-  const flowShareUrl = normalizeFlowShareUrl(body?.flowShareUrl || body?.videoUrl || '');
-  if (!recordId || !lockId || !assignee || !flowShareUrl) {
-    throw new Error('缺少 recordId、lockId、接单人或有效的 Flow 视频分享链接');
+  const flowDirectVideoUrl = normalizeFlowDirectVideoUrl(body?.videoUrl || body?.directVideoUrl || '');
+  const flowShareUrl = flowDirectVideoUrl ? '' : normalizeFlowShareUrl(body?.flowShareUrl || body?.videoUrl || '');
+  if (!recordId || !lockId || !assignee || (!flowShareUrl && !flowDirectVideoUrl)) {
+    throw new Error('缺少 recordId、lockId、接单人或有效的 Flow 视频分享链接/视频直链');
   }
 
   const record = await getRecord(recordId);
@@ -945,7 +1139,10 @@ async function startOmniComplete(body) {
 
   const existingJob = findRunningCompleteJob(recordId, lockId);
   if (existingJob) {
-    if (existingJob.flowShareUrl !== flowShareUrl) {
+    if (flowShareUrl && existingJob.flowShareUrl && existingJob.flowShareUrl !== flowShareUrl) {
+      throw new Error('当前订单正在转存另一个 Flow 视频，请等待完成后再操作');
+    }
+    if (flowDirectVideoUrl && existingJob.sourceVideoUrl && existingJob.sourceVideoUrl !== flowDirectVideoUrl) {
       throw new Error('当前订单正在转存另一个 Flow 视频，请等待完成后再操作');
     }
     return {
@@ -957,9 +1154,9 @@ async function startOmniComplete(body) {
     };
   }
 
-  const reservation = reserveOmniFlow(flowShareUrl, recordId, lockId);
+  const reservation = flowShareUrl ? reserveOmniFlow(flowShareUrl, recordId, lockId) : { created: false };
   const jobId = crypto.randomUUID();
-  const sourceVideoUrl = flowVideoSourceUrl(flowShareUrl);
+  const sourceVideoUrl = flowDirectVideoUrl || flowVideoSourceUrl(flowShareUrl);
   const job = {
     jobId,
     type: 'omni',
@@ -971,6 +1168,7 @@ async function startOmniComplete(body) {
     error: '',
     videoUrl: '',
     flowShareUrl,
+    sourceVideoUrl,
     createdAt: Date.now(),
     updatedAt: Date.now()
   };
@@ -978,12 +1176,13 @@ async function startOmniComplete(body) {
 
   try {
     await updateRecord(recordId, {
-      [config.fields.watermarkUrl]: hyperlinkField(flowShareUrl),
+      [config.fields.watermarkUrl]: hyperlinkField(flowShareUrl || flowDirectVideoUrl),
+      ...(flowDirectVideoUrl ? { [config.fields.videoUrl]: textUrlField(flowDirectVideoUrl) } : {}),
       [config.fields.platform]: 'Omni',
       [config.fields.lastError]: '',
       [config.fields.log]: appendLog(
         fieldText(record.fields?.[config.fields.log]),
-        `${assignee} 于 ${nowText()} 提交 Omni 视频转存：${flowShareUrl}`
+        `${assignee} 于 ${nowText()} 提交 Omni 视频转存：${flowShareUrl || flowDirectVideoUrl}`
       )
     });
     const queued = queueVideoArchive({
@@ -992,7 +1191,7 @@ async function startOmniComplete(body) {
       assignee,
       videoUrl: sourceVideoUrl,
       source: 'omni',
-      flowShareUrl,
+      flowShareUrl: flowShareUrl || flowDirectVideoUrl,
       completeJobId: jobId
     });
     if (!queued) {
@@ -1135,6 +1334,8 @@ function getCompleteJobStatus(body, expectedType = '') {
     message: job.message,
     error: job.error,
     videoUrl: job.videoUrl,
+    sourceVideoUrl: job.sourceVideoUrl || '',
+    flowShareUrl: job.flowShareUrl || '',
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     completedAt: job.completedAt || ''
@@ -1666,7 +1867,8 @@ async function runVideoArchive({ recordId, lockId, assignee, videoUrl, source, f
     });
   } catch (error) {
     const latest = await getRecord(recordId).catch(() => null);
-    const line = `${assignee} 于 ${startedAt} 归档视频失败：${publicError(error)}`;
+    const sourceForLog = source === 'omni' && flowShareUrl ? flowShareUrl : videoUrl;
+    const line = `${assignee} 于 ${startedAt} 归档视频失败：${publicError(error)}；源链接：${sourceForLog}`;
     const stillOwnsOrder = !['omni', 'doubao'].includes(source) || (
       fieldText(latest?.fields?.[config.fields.lockId]) === lockId
       && fieldText(latest?.fields?.[config.fields.assignee]) === assignee
@@ -1683,7 +1885,9 @@ async function runVideoArchive({ recordId, lockId, assignee, videoUrl, source, f
     finishCompleteJob(completeJobId, {
       status: 'failed',
       message: 'R2 转存失败，订单保持接单中，可重试或释放',
-      error: publicError(error)
+      error: publicError(error),
+      sourceVideoUrl: videoUrl,
+      flowShareUrl
     });
     throw error;
   }
@@ -2023,12 +2227,15 @@ async function listRecords() {
   return listRecordsByView('');
 }
 
-async function countRecords(filter, token, staggerMs = 0) {
+async function countRecords(filter, token, staggerMs = 0, viewId = '') {
   if (staggerMs > 0) {
     await delay(staggerMs);
   }
   const url = new URL(`https://open.feishu.cn/open-apis/bitable/v1/apps/${config.appToken}/tables/${config.tableId}/records`);
   url.searchParams.set('page_size', '1');
+  if (viewId) {
+    url.searchParams.set('view_id', viewId);
+  }
   if (filter) {
     url.searchParams.set('filter', filter);
   }
@@ -2328,6 +2535,27 @@ function normalizeFlowShareUrl(value) {
   return `https://${FLOW_HOST}/fx/tools/flow/shared/video/${match[1].toLowerCase()}`;
 }
 
+function normalizeFlowDirectVideoUrl(value) {
+  const text = String(value || '').trim();
+  if (!text || text.length > 2048) {
+    return '';
+  }
+  let url;
+  try {
+    url = new URL(text);
+  } catch {
+    return '';
+  }
+  if (url.protocol !== 'https:' || url.hostname !== 'flow-content.google' || url.username || url.password) {
+    return '';
+  }
+  const match = url.pathname.match(/^\/video\/([0-9a-f-]{36})\/?$/i);
+  if (!match) {
+    return '';
+  }
+  return `https://flow-content.google/video/${match[1].toLowerCase()}`;
+}
+
 function flowVideoSourceUrl(flowShareUrl) {
   const normalized = normalizeFlowShareUrl(flowShareUrl);
   const match = normalized && new URL(normalized).pathname.match(FLOW_SHARE_PATH);
@@ -2468,6 +2696,14 @@ function hyperlinkField(value) {
 
 function appendLog(previous, line) {
   return [String(previous || '').trim(), line].filter(Boolean).join('\n');
+}
+
+function sanitizeLogPart(value, maxLength = 120) {
+  return String(value ?? '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
 }
 
 function nowText() {

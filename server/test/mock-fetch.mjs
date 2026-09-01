@@ -44,7 +44,21 @@ function recordFields(recordId = 'rec1') {
       ...mutable
     };
   }
-  if (['batch', 'batch-100', 'data-not-ready'].includes(scenario)) {
+  if (scenario === 'orphaned-batch') {
+    const index = Number.parseInt(recordId.replace('rec', ''), 10) || 1;
+    return {
+      任务状态: '接单中',
+      接单人: '也比',
+      接单时间: Date.UTC(2026, 8, 1, 8, 0, index),
+      接单锁ID: `orphan-lock-${index}`,
+      提示词: `遗失批次提示词 ${recordId}`,
+      图片地址: `https://image.test/${recordId}.png`,
+      接单日志: `也比 于 2026-09-01 16:00:${String(index).padStart(2, '0')}接单`,
+      制作平台: '',
+      ...mutable
+    };
+  }
+  if (['batch', 'batch-100', 'batch-slow', 'data-not-ready'].includes(scenario)) {
     return {
       任务状态: '待接单',
       接单人: '',
@@ -95,6 +109,9 @@ globalThis.fetch = async (input, options = {}) => {
       }
       return json({ code: 0, data: { record: { record_id: recordId, fields: body.fields || {} } } });
     }
+    if (scenario === 'batch-slow') {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
     return json({ code: 0, data: { record: { record_id: recordId, fields: recordFields(recordId) } } });
   }
 
@@ -118,7 +135,7 @@ globalThis.fetch = async (input, options = {}) => {
     if (scenario === 'data-not-ready' && url.searchParams.has('view_id')) {
       return json({ code: 1254007, msg: 'Data not ready, please try again later' });
     }
-    const items = ['batch', 'batch-100', 'data-not-ready'].includes(scenario)
+    const items = ['batch', 'batch-100', 'batch-slow', 'data-not-ready', 'orphaned-batch'].includes(scenario)
       ? Array.from(
         { length: scenario === 'batch-100' ? 100 : 5 },
         (_, index) => `rec${index + 1}`
