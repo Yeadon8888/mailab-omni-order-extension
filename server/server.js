@@ -143,7 +143,7 @@ const server = http.createServer(async (req, res) => {
         archiveConfigured: !config.archive.enabled || isArchiveConfigured(),
         features: [
           'platform-claim', 'omni-complete', 'omni-batch', 'doubao-web-archive',
-          'multi-platform-order-web', 'async-batch-claim', 'assignee-recovery'
+          'multi-platform-order-web', 'async-batch-claim', 'assignee-recovery', 'doubao-resolver-failover-v2'
         ]
       });
       return;
@@ -344,12 +344,7 @@ async function runDoubaoWebArchive(job) {
       stage: 'resolving',
       message: '正在获取无水印视频地址'
     });
-    const directUrl = job.fallbackApi
-      ? await resolveDoubaoThreadVideo(job.shareUrl, {
-        timeoutMs: 30000,
-        fetchImpl: createInjectedDoubaoFetch(job.fallbackApi)
-      })
-      : await runWatermarkRemoval(job.shareUrl);
+    const directUrl = await runWatermarkRemoval(job.shareUrl, { fallbackApi: job.fallbackApi });
     updateDoubaoWebJob(job, {
       stage: 'downloading',
       message: '已获取视频，正在下载并准备转存'
@@ -1024,9 +1019,7 @@ async function startDoubaoOrderComplete(body) {
 
 async function runDoubaoOrderCompleteJob(job, fallbackApi) {
   try {
-    const videoUrl = fallbackApi
-      ? await resolveDoubaoThreadVideo(job.shareUrl, { timeoutMs: 30000, fetchImpl: createInjectedDoubaoFetch(fallbackApi) })
-      : await runWatermarkRemoval(job.shareUrl);
+    const videoUrl = await runWatermarkRemoval(job.shareUrl, { fallbackApi });
     if (!videoUrl) throw new Error('没有取得豆包无水印视频地址');
     Object.assign(job, { message: '已获取无水印视频，正在转存 R2', updatedAt: Date.now() });
     const queued = queueVideoArchive({
@@ -1567,14 +1560,14 @@ function assertLock(record, lockId, assignee) {
   }
 }
 
-async function runWatermarkRemoval(watermarkUrl) {
+async function runWatermarkRemoval(watermarkUrl, { fallbackApi = '' } = {}) {
   const errors = [];
-  const publicDoubaoThreadUrl = config.doubaoLocalResolve ? normalizeDoubaoThreadUrl(watermarkUrl) : '';
+  const publicDoubaoThreadUrl = (fallbackApi || config.doubaoLocalResolve) ? normalizeDoubaoThreadUrl(watermarkUrl) : '';
   if (publicDoubaoThreadUrl) {
     try {
       return await resolveDoubaoThreadVideo(publicDoubaoThreadUrl, {
         timeoutMs: 30000,
-        fetchImpl: fetchDoubaoResolverResource
+        fetchImpl: fallbackApi ? createInjectedDoubaoFetch(fallbackApi) : fetchDoubaoResolverResource
       });
     } catch (error) {
       errors.push(error);
@@ -1582,6 +1575,8 @@ async function runWatermarkRemoval(watermarkUrl) {
     }
   }
 
+  // Re-parse the original share URL independently; never download the rejected
+  // client metadata URL just because its host was not recognized.
   const providers = [...new Set([config.watermarkProvider, 'doubao'])];
   for (const provider of providers) {
     try {

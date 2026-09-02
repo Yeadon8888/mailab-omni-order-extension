@@ -56,21 +56,32 @@ export async function resolveDoubaoThreadVideo(shareUrl, options = {}) {
     throw new Error('豆包视频信息不是有效 JSON');
   }
   const data = getVideoData(payload);
-  const token = pickBestVideoToken(data);
   const keySeed = findKeySeed(payload);
-  const directVideoUrl = decodeVideoUrlToken(token, keySeed);
-  if (!directVideoUrl) {
-    throw new Error('豆包 qAAB 视频直链解密失败');
+  const rejectedHosts = new Set();
+  let sawWatermarkedVideo = false;
+  for (const token of rankedVideoTokens(data)) {
+    const directVideoUrl = decodeVideoUrlToken(token, keySeed);
+    if (!directVideoUrl) continue;
+    const parsedVideoUrl = new URL(directVideoUrl);
+    if (!isTrustedVideoHost(parsedVideoUrl.hostname)) {
+      rejectedHosts.add(parsedVideoUrl.hostname);
+      continue;
+    }
+    if (parsedVideoUrl.searchParams.get('lr') !== 'unwatermarked') {
+      sawWatermarkedVideo = true;
+      continue;
+    }
+    return directVideoUrl;
   }
 
-  const parsedVideoUrl = new URL(directVideoUrl);
-  if (!isTrustedVideoHost(parsedVideoUrl.hostname)) {
-    throw new Error('豆包返回了非受信任的视频域名');
+  if (rejectedHosts.size) {
+    // Hostnames only: signed paths and query parameters must not enter logs.
+    throw new Error(`豆包返回了非受信任的视频域名：${[...rejectedHosts].slice(0, 8).join('、')}`);
   }
-  if (parsedVideoUrl.searchParams.get('lr') !== 'unwatermarked') {
+  if (sawWatermarkedVideo) {
     throw new Error('豆包返回的视频不是无水印版本');
   }
-  return directVideoUrl;
+  throw new Error('豆包 qAAB 视频直链解密失败');
 }
 
 export function normalizeDoubaoThreadUrl(value) {
@@ -146,19 +157,20 @@ function getVideoData(payload) {
   return data && typeof data === 'object' ? data : {};
 }
 
-function pickBestVideoToken(data) {
+function rankedVideoTokens(data) {
   const videoList = data?.video_list;
   const entries = videoList && typeof videoList === 'object' ? Object.values(videoList) : [data];
-  let best = null;
+  const ranked = [];
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object') continue;
-    const token = String(entry.main_url || entry.play_url || '').trim();
-    if (!token) continue;
     const score = Number(entry.bitrate || entry.real_bitrate || 0)
       + Number(entry.vwidth || entry.width || 0) * Number(entry.vheight || entry.height || 0);
-    if (!best || score > best.score) best = { token, score };
+    // Try every URL for the same rendition before moving to a lower quality.
+    const tokens = [entry.main_url, entry.play_url, entry.backup_url_1, entry.backup_url_2, entry.backup_url]
+      .filter((value) => typeof value === 'string' && value.trim()).map((value) => value.trim());
+    ranked.push({ tokens, score: Number.isFinite(score) ? score : 0 });
   }
-  return best?.token || '';
+  return [...new Set(ranked.sort((a, b) => b.score - a.score).flatMap((item) => item.tokens))];
 }
 
 function findKeySeed(value, depth = 0) {
@@ -213,7 +225,7 @@ async function fetchWithDeadline(fetchImpl, input, options, timeoutMs) {
 function isHttpsUrl(value) {
   try {
     const url = new URL(String(value || ''));
-    return url.protocol === 'https:' && !url.username && !url.password;
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port;
   } catch {
     return false;
   }
@@ -226,6 +238,6 @@ function isTrustedFallbackHost(hostname) {
 
 function isTrustedVideoHost(hostname) {
   const host = String(hostname || '').toLowerCase();
-  return ['douyin.com', 'douyinvod.com', 'bytecdn.cn', 'byteimg.com']
+  return ['doubao.com', 'douyin.com', 'douyinvod.com', 'bytecdn.cn', 'byteimg.com']
     .some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
 }

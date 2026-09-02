@@ -22,6 +22,15 @@ Private source repository for the MAILAB shared Feishu order workflow.
 
 ## Verification
 
+### Doubao resolver compatibility (2026-09-02)
+
+- Submitted links remain restricted to public Doubao threads or supported Omni Flow shares. A share-page host is not necessarily the video CDN host.
+- The local Doubao resolver accepts HTTPS video URLs on `doubao.com`, `douyin.com`, `douyinvod.com`, `bytecdn.cn`, and `byteimg.com`, including their actual subdomains (not lookalike suffixes). Credentials and nonstandard ports are rejected; the `lr=unwatermarked` requirement is retained.
+- Within each quality tier it checks main/play/backup URLs before trying a lower quality. Unknown-domain errors record only hostnames, never signed URL paths or query strings.
+- Both the order desk and standalone archive route use the same resolver/provider failover chain, including when the browser supplies `fallbackApi`. An unrecognized candidate is never passed directly to the downloader: providers independently resolve the original share link.
+- Failed order transfers retain their lock and assignment. Completion still requires R2 verification and successful Feishu write-back.
+- Historical logs did not include the rejected hostname. Do not assume a particular CDN caused those historical failures; the regression fixtures test compatibility and failover behavior, not captured historical payloads.
+
 ```bash
 npm test --prefix server
 node --test extension-omni/test/*.test.mjs

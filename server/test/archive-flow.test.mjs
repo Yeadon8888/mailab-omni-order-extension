@@ -321,6 +321,43 @@ test('Doubao order fails over when the preferred provider account is disabled', 
   assert.match(completed.videoUrl, /^https:\/\/r2\.test\/mailab\/videos\//);
 });
 
+for (const scenario of ['doubao-client-domain-failover', 'doubao-client-decode-failover', 'doubao-client-all-fail']) {
+  test(`client fallback_api failures use provider failover: ${scenario}`, async (t) => {
+    const server = await startServer(scenario);
+    t.after(() => server.stop());
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/order/complete`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ recordId: 'rec1', lockId: 'lock1', assignee: 'tester',
+        shareUrl: 'https://www.doubao.com/thread/test-thread',
+        fallbackApi: 'https://vas-lf-x.snssdk.com/video/fplay/mock' })
+    });
+    const started = await response.json();
+    const fail = scenario === 'doubao-client-all-fail';
+    const result = await waitForPlatformJob(server.port, started.jobId, '豆包', fail ? 'failed' : 'completed');
+    assert.ok(result, 'client metadata must not bypass the failover chain');
+    if (fail) {
+      assert.match(result.error, /备用解析暂不可用/);
+      assert.equal(readUpdates(server.updatesPath).some((row) => row['任务状态'] || row['接单锁ID'] === ''), false);
+    } else {
+      assert.match(result.videoUrl, /^https:\/\/r2\.test\//);
+    }
+  });
+}
+
+test('standalone Doubao archive also fails over from an untrusted client video domain', async (t) => {
+  const server = await startServer('doubao-client-domain-failover');
+  t.after(() => server.stop());
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/doubao/archive`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ url: 'https://www.doubao.com/thread/test-thread',
+      fallbackApi: 'https://vas-lf-x.snssdk.com/video/fplay/mock' })
+  });
+  const started = await response.json();
+  const result = await waitForDoubaoWebJob(server.port, started.jobId, 'completed');
+  assert.ok(result, 'standalone web archive must use the same failover chain');
+  assert.match(result.videoUrl, /^https:\/\/r2\.test\//);
+});
+
 test('standalone Doubao web archive returns only a verified R2 URL', async (t) => {
   const server = await startServer('doubao-web-success');
   t.after(() => server.stop());

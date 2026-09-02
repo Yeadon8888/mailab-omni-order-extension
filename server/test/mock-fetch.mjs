@@ -177,6 +177,14 @@ globalThis.fetch = async (input, options = {}) => {
     });
   }
 
+  if (url.hostname.endsWith('.snssdk.com') && scenario.startsWith('doubao-client-')) {
+    return json({ video_info: { data: { video_list: { v: {
+      main_url: scenario === 'doubao-client-decode-failover'
+        ? 'unreadable-token'
+        : 'https://unknown.invalid/video.mp4?lr=unwatermarked'
+    } } } } });
+  }
+
   if (url.href === doubaoVideoUrl) {
     return new Response(new Uint8Array([0, 0, 0, 24]), {
       status: 200,
@@ -187,7 +195,7 @@ globalThis.fetch = async (input, options = {}) => {
     });
   }
 
-  if (url.hostname === 'api.zhuceka.cn' && scenario === 'doubao-provider-disabled-failover') {
+  if (url.hostname === 'api.zhuceka.cn' && (scenario === 'doubao-provider-disabled-failover' || scenario.startsWith('doubao-client-'))) {
     return json({ code: 403, msg: '账号已禁用或不存在' });
   }
 
@@ -195,7 +203,11 @@ globalThis.fetch = async (input, options = {}) => {
     return json({ code: 200, data: { video: sourceUrl }, msg: 'ok' });
   }
 
-  if (url.hostname === 'api.sdtmp.com' && scenario === 'doubao-provider-disabled-failover') {
+  if (url.hostname === 'api.sdtmp.com' && scenario === 'doubao-client-all-fail') {
+    return json({ ok: false, error: '备用解析暂不可用' }, 503);
+  }
+
+  if (url.hostname === 'api.sdtmp.com' && (scenario === 'doubao-provider-disabled-failover' || scenario.startsWith('doubao-client-'))) {
     return json({ ok: true, status: 'succeeded', url: sourceUrl });
   }
 
@@ -210,7 +222,7 @@ globalThis.fetch = async (input, options = {}) => {
   }
 
   if (url.href.startsWith('https://r2.test/')) {
-    if (['complete-success', 'omni-success', 'doubao-web-success', 'doubao-order-success', 'doubao-provider-fallback', 'doubao-provider-disabled-failover'].includes(scenario)) {
+    if (scenario.startsWith('doubao-client-') || ['complete-success', 'omni-success', 'doubao-web-success', 'doubao-order-success', 'doubao-provider-fallback', 'doubao-provider-disabled-failover'].includes(scenario)) {
       return new Response(new Uint8Array([0]), {
         status: 206,
         headers: { 'content-type': 'video/mp4' }
