@@ -15,6 +15,7 @@ const FLOW_HOST = 'labs.google';
 const FLOW_SHARE_PATH = /^\/fx\/tools\/flow\/shared\/video\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/?$/i;
 const MAX_OMNI_BATCH_ORDERS = 100;
 const CLAIM_BATCH_CONCURRENCY = Math.max(1, Math.min(10, Number.parseInt(env.CLAIM_BATCH_CONCURRENCY || '5', 10) || 5));
+const FEISHU_TRANSIENT_ATTEMPTS = Math.max(2, Math.min(6, Number.parseInt(env.FEISHU_TRANSIENT_ATTEMPTS || '5', 10) || 5));
 const OMNI_FLOW_RESERVATION_TTL_MS = 24 * 60 * 60 * 1000;
 const ORDER_STATS_CACHE_TTL_MS = 30 * 1000;
 const DOUBAO_WEB_JOB_TTL_MS = 60 * 60 * 1000;
@@ -788,7 +789,7 @@ async function recoverPlatformOrders(body) {
       }
       return { order: buildRecoveredOrder(record, assignee) };
     } catch (error) {
-      return { missing: { recordId: candidate.recordId, reason: publicError(error) } };
+      return { missing: { recordId: candidate.recordId, reason: publicError(error), retryable: isFeishuDataNotReady(error) } };
     }
   });
   const orders = recoveryResults.filter((result) => result.order).map((result) => result.order);
@@ -2218,6 +2219,29 @@ async function listRecords() {
   return listRecordsByView('');
 }
 
+async function fetchFeishuJson(input, options = {}) {
+  let lastResponse;
+  let lastData;
+  for (let attempt = 0; attempt < FEISHU_TRANSIENT_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(input, options);
+      const data = await response.json();
+      lastResponse = response;
+      lastData = data;
+      const message = String(data?.msg || '');
+      const transient = response.status === 429 || response.status >= 500
+        || /data not ready|数据尚未准备好|暂时不可用|temporarily unavailable/i.test(message);
+      if (!transient || attempt === FEISHU_TRANSIENT_ATTEMPTS - 1) {
+        return { response, data };
+      }
+    } catch (error) {
+      if (attempt === FEISHU_TRANSIENT_ATTEMPTS - 1) throw error;
+    }
+    await delay(Math.min(4000, 300 * (attempt + 1)));
+  }
+  return { response: lastResponse, data: lastData };
+}
+
 async function countRecords(filter, token, staggerMs = 0, viewId = '') {
   if (staggerMs > 0) {
     await delay(staggerMs);
@@ -2290,10 +2314,9 @@ async function listRecordsByView(viewId = '') {
     if (pageToken) {
       url.searchParams.set('page_token', pageToken);
     }
-    const response = await fetch(url, {
+    const { response, data } = await fetchFeishuJson(url, {
       headers: { authorization: `Bearer ${token}` }
     });
-    const data = await response.json();
     if (!response.ok || data.code !== 0) {
       throw new Error(data.msg || `读取记录失败 HTTP ${response.status}`);
     }
@@ -2319,10 +2342,9 @@ async function getPendingViewId() {
   }
   const token = await getTenantToken();
   const url = new URL(`https://open.feishu.cn/open-apis/bitable/v1/apps/${config.appToken}/tables/${config.tableId}/views`);
-  const response = await fetch(url, {
+  const { response, data } = await fetchFeishuJson(url, {
     headers: { authorization: `Bearer ${token}` }
   });
-  const data = await response.json();
   if (!response.ok || data.code !== 0) {
     throw new Error(data.msg || `读取视图失败 HTTP ${response.status}`);
   }
@@ -2339,10 +2361,9 @@ async function getPendingViewId() {
 
 async function getRecord(recordId) {
   const token = await getTenantToken();
-  const response = await fetch(`https://open.feishu.cn/open-apis/bitable/v1/apps/${config.appToken}/tables/${config.tableId}/records/${recordId}`, {
+  const { response, data } = await fetchFeishuJson(`https://open.feishu.cn/open-apis/bitable/v1/apps/${config.appToken}/tables/${config.tableId}/records/${recordId}`, {
     headers: { authorization: `Bearer ${token}` }
   });
-  const data = await response.json();
   if (!response.ok || data.code !== 0) {
     throw new Error(data.msg || `读取记录失败 HTTP ${response.status}`);
   }
@@ -2351,7 +2372,7 @@ async function getRecord(recordId) {
 
 async function updateRecord(recordId, fields) {
   const token = await getTenantToken();
-  const response = await fetch(`https://open.feishu.cn/open-apis/bitable/v1/apps/${config.appToken}/tables/${config.tableId}/records/${recordId}`, {
+  const { response, data } = await fetchFeishuJson(`https://open.feishu.cn/open-apis/bitable/v1/apps/${config.appToken}/tables/${config.tableId}/records/${recordId}`, {
     method: 'PUT',
     headers: {
       authorization: `Bearer ${token}`,
@@ -2359,7 +2380,6 @@ async function updateRecord(recordId, fields) {
     },
     body: JSON.stringify({ fields })
   });
-  const data = await response.json();
   if (!response.ok || data.code !== 0) {
     throw new Error(data.msg || `更新记录失败 HTTP ${response.status}`);
   }
