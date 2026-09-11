@@ -485,7 +485,7 @@ async function claimPendingRecord(pending, assignee, platform, rowNumber = 0) {
     ...(platform ? { [config.fields.platform]: platform } : {}),
     [config.fields.log]: appendLog(
       previousLog,
-      `${assignee} 于 ${now}${platform ? ` 使用 ${platform} 工作台` : ''}接单${rowNumber ? ` · 兼职表第 ${rowNumber} 行` : ''}`
+      `${assignee} 于 ${now}${platform ? ` 使用 ${platform} 工作台` : ''}接单${rowNumber ? ` · 待接单视图第 ${rowNumber} 行` : ''}`
     )
   };
   await updateRecord(pending.record_id, fields);
@@ -663,16 +663,14 @@ async function claimPlatformBatch(body) {
   let missingRows = [];
   try {
     if (rowNumbers.length) {
-      // 指定行号对应飞书数据表的绝对行号，而不是“待接单”视图中过滤后的序号。
-      // 兼职表现在可直接写入任务，视图可能只有少量待接单记录，不能再用过滤后数组索引。
-      const tableRecords = await listRecords();
+      // 指定行号对应“待接单”视图中的当前行号。
+      // 视图本身已经过滤出可领取任务，直接按视图顺序定位即可。
+      const availableRecords = (await listPendingRecords())
+        .filter((record) => fieldText(record.fields?.[config.fields.status]) === config.statuses.pending);
       pendingEntries = rowNumbers
-        .map((rowNumber) => ({ pending: tableRecords[rowNumber - 1], rowNumber }))
-        .filter((entry) => entry.pending && fieldText(entry.pending.fields?.[config.fields.status]) === config.statuses.pending);
-      missingRows = rowNumbers.filter((rowNumber) => {
-        const record = tableRecords[rowNumber - 1];
-        return !record || fieldText(record.fields?.[config.fields.status]) !== config.statuses.pending;
-      });
+        .map((rowNumber) => ({ pending: availableRecords[rowNumber - 1], rowNumber }))
+        .filter((entry) => entry.pending);
+      missingRows = rowNumbers.filter((rowNumber) => !availableRecords[rowNumber - 1]);
     } else {
       const availableRecords = (await listPendingRecords())
         .filter((record) => fieldText(record.fields?.[config.fields.status]) === config.statuses.pending);
