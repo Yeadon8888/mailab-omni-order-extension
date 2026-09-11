@@ -485,7 +485,7 @@ async function claimPendingRecord(pending, assignee, platform, rowNumber = 0) {
     ...(platform ? { [config.fields.platform]: platform } : {}),
     [config.fields.log]: appendLog(
       previousLog,
-      `${assignee} 于 ${now}${platform ? ` 使用 ${platform} 工作台` : ''}接单${rowNumber ? ` · 待接单视图第 ${rowNumber} 行` : ''}`
+      `${assignee} 于 ${now}${platform ? ` 使用 ${platform} 工作台` : ''}接单${rowNumber ? ` · 兼职表第 ${rowNumber} 行` : ''}`
     )
   };
   await updateRecord(pending.record_id, fields);
@@ -864,7 +864,7 @@ function buildRecoveredOrder(record, assignee) {
 }
 
 function extractClaimRowNumber(logText) {
-  const matches = [...String(logText || '').matchAll(/待接单视图第\s*(\d+)\s*行/g)];
+  const matches = [...String(logText || '').matchAll(/(?:待接单视图|兼职表)第\s*(\d+)\s*行/g)];
   const rowNumber = Number.parseInt(matches.at(-1)?.[1] || '', 10);
   return Number.isSafeInteger(rowNumber) && rowNumber > 0 ? rowNumber : 0;
 }
