@@ -662,14 +662,20 @@ async function claimPlatformBatch(body) {
   let pendingEntries = [];
   let missingRows = [];
   try {
-    const availableRecords = (await listPendingRecords())
-      .filter((record) => fieldText(record.fields?.[config.fields.status]) === config.statuses.pending);
     if (rowNumbers.length) {
+      // 指定行号对应飞书数据表的绝对行号，而不是“待接单”视图中过滤后的序号。
+      // 兼职表现在可直接写入任务，视图可能只有少量待接单记录，不能再用过滤后数组索引。
+      const tableRecords = await listRecords();
       pendingEntries = rowNumbers
-        .map((rowNumber) => ({ pending: availableRecords[rowNumber - 1], rowNumber }))
-        .filter((entry) => entry.pending);
-      missingRows = rowNumbers.filter((rowNumber) => !availableRecords[rowNumber - 1]);
+        .map((rowNumber) => ({ pending: tableRecords[rowNumber - 1], rowNumber }))
+        .filter((entry) => entry.pending && fieldText(entry.pending.fields?.[config.fields.status]) === config.statuses.pending);
+      missingRows = rowNumbers.filter((rowNumber) => {
+        const record = tableRecords[rowNumber - 1];
+        return !record || fieldText(record.fields?.[config.fields.status]) !== config.statuses.pending;
+      });
     } else {
+      const availableRecords = (await listPendingRecords())
+        .filter((record) => fieldText(record.fields?.[config.fields.status]) === config.statuses.pending);
       pendingEntries = availableRecords
         .slice(0, count)
         .map((pending, index) => ({ pending, rowNumber: index + 1 }));
