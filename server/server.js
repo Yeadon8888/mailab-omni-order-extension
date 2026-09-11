@@ -12,7 +12,7 @@ const execFileAsync = promisify(execFile);
 const env = loadEnv();
 const CLAIM_PLATFORMS = new Set(['豆包', 'Omni']);
 const FLOW_HOST = 'labs.google';
-const FLOW_SHARE_PATH = /^\/fx\/tools\/flow\/shared\/video\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/?$/i;
+const FLOW_SHARE_PATH = /^(?:\/fx\/tools\/flow\/shared\/video|\/shared\/video)\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/?$/i;
 const MAX_OMNI_BATCH_ORDERS = 100;
 const CLAIM_BATCH_CONCURRENCY = Math.max(1, Math.min(10, Number.parseInt(env.CLAIM_BATCH_CONCURRENCY || '5', 10) || 5));
 const FEISHU_TRANSIENT_ATTEMPTS = Math.max(2, Math.min(6, Number.parseInt(env.FEISHU_TRANSIENT_ATTEMPTS || '5', 10) || 5));
@@ -2536,7 +2536,7 @@ function normalizeFlowShareUrl(value) {
   } catch {
     return '';
   }
-  if (url.protocol !== 'https:' || url.hostname !== FLOW_HOST || url.username || url.password) {
+  if (url.protocol !== 'https:' || ![FLOW_HOST, 'flow.google.com'].includes(url.hostname) || url.username || url.password) {
     return '';
   }
   const match = url.pathname.match(FLOW_SHARE_PATH);
