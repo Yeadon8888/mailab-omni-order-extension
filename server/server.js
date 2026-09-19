@@ -1554,12 +1554,12 @@ async function resetRecordForRetry(record, logLine, lastError = '') {
     : logLine;
   await updateRecord(record.record_id, {
     [config.fields.status]: status,
-    [config.fields.assignee]: '',
+    [config.fields.assignee]: null,
     [config.fields.claimedAt]: null,
-    [config.fields.lockId]: '',
-    [config.fields.platform]: '',
+    [config.fields.lockId]: null,
+    [config.fields.platform]: null,
     [config.fields.failCount]: nextFailCount,
-    [config.fields.lastError]: lastError,
+    [config.fields.lastError]: lastError || null,
     [config.fields.log]: appendLog(fieldText(record.fields[config.fields.log]), `${reason}（${nowText()}）`)
   });
 }

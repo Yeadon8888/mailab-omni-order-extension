@@ -337,7 +337,7 @@ for (const scenario of ['doubao-client-domain-failover', 'doubao-client-decode-f
     assert.ok(result, 'client metadata must not bypass the failover chain');
     if (fail) {
       assert.match(result.error, /备用解析暂不可用/);
-      assert.equal(readUpdates(server.updatesPath).some((row) => row['任务状态'] || row['接单锁ID'] === ''), false);
+      assert.equal(readUpdates(server.updatesPath).some((row) => row['任务状态'] || Object.hasOwn(row, '接单锁ID')), false);
     } else {
       assert.match(result.videoUrl, /^https:\/\/r2\.test\//);
     }
@@ -483,7 +483,7 @@ test('claim records the selected production platform and release clears it', asy
     body: JSON.stringify({ recordId: 'rec1', lockId: claimed.lockId, reason: '测试释放' })
   });
   assert.equal(releaseResponse.status, 200);
-  assert.ok(readUpdates(server.updatesPath).some((fields) => fields['制作平台'] === ''));
+  assert.ok(readUpdates(server.updatesPath).some((fields) => fields['制作平台'] === null));
 });
 
 test('Omni batch claim can be recovered and safely released with per-order locks', async (t) => {
