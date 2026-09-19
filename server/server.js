@@ -808,7 +808,10 @@ async function recoverPlatformOrdersByAssignee(body) {
   const limit = clampNumber(Number(body?.limit || MAX_OMNI_BATCH_ORDERS), 1, MAX_OMNI_BATCH_ORDERS);
   if (!assignee) throw new Error('请输入接单人');
 
-  const records = await listRecords();
+  const records = await listRecordsByFilter(andFilter([
+    textFilter(config.fields.assignee, assignee),
+    statusFilter(config.statuses.inProgress)
+  ]));
   const owned = records.filter((record) => {
     const fields = record.fields || {};
     const recordPlatform = fieldText(fields[config.fields.platform]);
@@ -1428,9 +1431,18 @@ async function loadOrderStats() {
 }
 
 function statusFilter(status) {
-  const field = String(config.fields.status).replace(/\\/g, '\\\\').replace(/\]/g, '\\]');
-  const value = String(status).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  return `CurrentValue.[${field}]="${value}"`;
+  return textFilter(config.fields.status, status);
+}
+
+function textFilter(fieldName, value) {
+  const field = String(fieldName).replace(/\\/g, '\\\\').replace(/\]/g, '\\]');
+  const escaped = String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return `CurrentValue.[${field}]="${escaped}"`;
+}
+
+function andFilter(filters) {
+  const parts = filters.filter(Boolean);
+  return parts.length === 1 ? parts[0] : `AND(${parts.join(',')})`;
 }
 
 async function retryUnarchivedVideos(body) {
@@ -2223,6 +2235,10 @@ async function listRecords() {
   return listRecordsByView('');
 }
 
+async function listRecordsByFilter(filter) {
+  return listRecordsByView('', filter);
+}
+
 async function fetchFeishuJson(input, options = {}) {
   let lastResponse;
   let lastData;
@@ -2305,7 +2321,7 @@ function isFeishuDataNotReady(error) {
   return /data not ready|数据尚未准备好/i.test(publicError(error));
 }
 
-async function listRecordsByView(viewId = '') {
+async function listRecordsByView(viewId = '', filter = '') {
   const token = await getTenantToken();
   const records = [];
   let pageToken = '';
@@ -2314,6 +2330,9 @@ async function listRecordsByView(viewId = '') {
     url.searchParams.set('page_size', '500');
     if (viewId) {
       url.searchParams.set('view_id', viewId);
+    }
+    if (filter) {
+      url.searchParams.set('filter', filter);
     }
     if (pageToken) {
       url.searchParams.set('page_token', pageToken);
