@@ -42,7 +42,7 @@ test.before(async () => {
     }
     return route.fulfill({ status: 200, contentType: 'text/html', body: projectFixture() });
   });
-  await context.route('https://genvideo.mailab.top/**', async (route) => {
+  await context.route('https://tuchuang-api.yeadon8888.workers.dev/**', async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === '/api/image-proxy') return route.fulfill({ status: 200, contentType: 'image/png', body: png });
     const response = apiResponse(url.pathname);

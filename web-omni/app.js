@@ -1,4 +1,4 @@
-const API = "https://genvideo.mailab.top";
+const API = "https://tuchuang-api.yeadon8888.workers.dev/order-api";
 const FLOW_PATH = /^\/fx\/tools\/flow\/shared\/video\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/?$/i;
 const STATE_KEY = "mailab_omni_batch_workbench_v1";
 const MAX_ACTIVE_ORDERS = 10;

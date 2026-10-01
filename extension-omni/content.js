@@ -1,5 +1,5 @@
 (() => {
-  const DEFAULT_SERVER_URL = 'https://genvideo.mailab.top';
+  const DEFAULT_SERVER_URL = 'https://tuchuang-api.yeadon8888.workers.dev/order-api';
   const BATCH_KEY = 'mailab_omni_batch_state_v2';
   const POSITION_KEY = 'mailab_omni_batch_position_v2';
   const MAX_ACTIVE = 10;

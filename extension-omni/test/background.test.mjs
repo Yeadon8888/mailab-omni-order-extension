@@ -41,7 +41,7 @@ test('opens the Flow share worker in the foreground and remembers the source tab
         recordId: 'rec_test',
         lockId: 'lock_test',
         assignee: 'tester',
-        serverUrl: 'https://genvideo.mailab.top'
+        serverUrl: 'https://tuchuang-api.yeadon8888.workers.dev/order-api'
       }
     }, { tab: { id: 7 } }, resolve);
     assert.equal(keepChannelOpen, true);

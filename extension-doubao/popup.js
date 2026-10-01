@@ -1,5 +1,5 @@
 const STORAGE_KEY = 'mailab_public_order_settings';
-const DEFAULT_SERVER_URL = 'https://genvideo.mailab.top';
+const DEFAULT_SERVER_URL = 'https://tuchuang-api.yeadon8888.workers.dev/order-api';
 
 const els = {
   toast: document.getElementById('toast'),

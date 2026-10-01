@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MAILAB OMNI VIDEO",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "MAILAB Omni 批量接单、自动投喂 Flow、生成监控、R2 转存与飞书回填工具。",
   "icons": {
     "16": "icons/icon16.png",
@@ -20,7 +20,7 @@
   ],
   "host_permissions": [
     "https://labs.google/*",
-    "https://genvideo.mailab.top/*",
+    "https://tuchuang-api.yeadon8888.workers.dev/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],

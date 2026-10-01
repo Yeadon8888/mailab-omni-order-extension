@@ -1,4 +1,4 @@
-const DEFAULT_SERVER_URL = 'https://genvideo.mailab.top';
+const DEFAULT_SERVER_URL = 'https://tuchuang-api.yeadon8888.workers.dev/order-api';
 const BATCH_KEY = 'mailab_omni_batch_state_v2';
 const SHARE_WORK_KEY = 'mailab_omni_share_work_v1';
 const FLOW_SHARE_PATH = /^\/fx\/tools\/flow\/shared\/video\/([0-9a-f-]{36})\/?$/i;

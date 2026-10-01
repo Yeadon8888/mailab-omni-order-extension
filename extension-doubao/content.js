@@ -5,7 +5,7 @@
   const STORAGE_KEY = 'mailab_public_order_settings';
   const POSITION_KEY = 'mailab_public_order_position';
   const ACTIVE_ORDER_KEY = 'mailab_public_active_order';
-  const DEFAULT_SERVER_URL = 'https://genvideo.mailab.top';
+  const DEFAULT_SERVER_URL = 'https://tuchuang-api.yeadon8888.workers.dev/order-api';
   const iconUrl = chrome.runtime.getURL('icons/icon48.png');
 
   const host = document.createElement('div');
